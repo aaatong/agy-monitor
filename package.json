@@ -1,0 +1,28 @@
+{
+  "name": "agy-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build:web": "vite build",
+    "build:sidecar": "esbuild src/sidecar/main.ts --platform=node --format=esm --bundle --external:sidecar_sdk --outfile=sidecars/monitor-ui/main.mjs",
+    "build": "pnpm run typecheck && pnpm run build:web && pnpm run build:sidecar",
+    "dev:web": "vite",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "preact": "^10.26.4"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.1",
+    "@tailwindcss/vite": "^4.1.0",
+    "@types/node": "^22.13.0",
+    "esbuild": "^0.25.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.0",
+    "vite-plugin-singlefile": "^2.2.0",
+    "vitest": "^5.1.1"
+  }
+}

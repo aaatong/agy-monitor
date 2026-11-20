@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="28" y1="24" x2="228" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1b2232"/>
+      <stop offset="100%" stop-color="#111621"/>
+    </linearGradient>
+    <linearGradient id="arcGrad" x1="68" y1="178" x2="196" y2="96" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5b9cf6"/>
+      <stop offset="100%" stop-color="#3fb98f"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 10% outer safe margin -->
+  <rect x="26" y="26" width="204" height="204" rx="46" fill="url(#bgGrad)"/>
+  <rect x="27.5" y="27.5" width="201" height="201" rx="44.5" stroke="#334155" stroke-width="3"/>
+
+  <!-- Subtle gauge track -->
+  <path d="M 75.7 178.3 A 74 74 0 1 1 180.3 178.3" stroke="#2a3447" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- Active blue-to-teal gauge arc -->
+  <path d="M 75.7 178.3 A 74 74 0 1 1 196.4 99.6" stroke="url(#arcGrad)" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- Clean pulse waveform -->
+  <path d="M 72 138 L 98 138 L 111 106 L 128 156 L 145 118 L 157 138 L 184 138"
+        stroke="#e2e8f0" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="196.4" cy="99.6" r="6" fill="#3fb98f"/>
+</svg>

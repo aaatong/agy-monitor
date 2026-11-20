@@ -1,0 +1,7 @@
+{
+  "name": "agy-monitor",
+  "displayName": "AGY Monitor",
+  "description": "Monitor current Antigravity session context window usage, aggregated main and subagent token usage, and prompt cache hit rate in a live sidebar panel.",
+  "logo": "assets/logo.svg",
+  "version": "0.1.0"
+}

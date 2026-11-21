@@ -170,5 +170,77 @@ describe('transcript-parser', () => {
 
     expect(syncTranscriptState(state)).toBe(true);
     expect(state.childIds).toEqual([swarmChildId, subagentChildId]);
+    expect(state.childLabels).toEqual({ [swarmChildId]: 'worker' });
+  });
+
+  it('extracts friendly childLabels from nested or text-prefixed JSON payloads', () => {
+    const filePath = makeTempFile();
+    const selfId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const childOne = 'bbbbbbbb-1111-1111-1111-111111111111';
+    const childTwo = 'cccccccc-2222-2222-2222-222222222222';
+    const state = createEmptyTranscriptState(selfId, filePath);
+
+    const lines = [
+      {
+        step_index: 1,
+        type: 'GENERIC',
+        content: JSON.stringify({
+          added: [{ name: 'hook-investigator', conversation_id: childOne }],
+        }),
+      },
+      {
+        step_index: 2,
+        type: 'GENERIC',
+        content: `Spawned subagent: {"name":"app-investigator","conversationId":"${childTwo}"}`,
+      },
+    ];
+    fs.writeFileSync(filePath, lines.map((l) => JSON.stringify(l)).join('\n') + '\n', 'utf8');
+
+    expect(syncTranscriptState(state)).toBe(true);
+    expect(state.childIds).toEqual([childOne, childTwo]);
+    expect(state.childLabels).toEqual({
+      [childOne]: 'hook-investigator',
+      [childTwo]: 'app-investigator',
+    });
+  });
+
+  it('ignores read_file, read_board, and active-session.json dumps in GENERIC lines', () => {
+    const filePath = makeTempFile();
+    const selfId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const unrelatedA = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
+    const unrelatedB = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
+    const unrelatedC = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+    const state = createEmptyTranscriptState(selfId, filePath);
+
+    const lines = [
+      {
+        step_index: 1,
+        type: 'GENERIC',
+        content: JSON.stringify({
+          active: {
+            conversationId: unrelatedA,
+            transcriptPath: `/tmp/brain/${unrelatedA}/.system_generated/logs/transcript_full.jsonl`,
+          },
+          recent: [{ conversationId: unrelatedA }],
+        }),
+      },
+      {
+        step_index: 2,
+        type: 'GENERIC',
+        content: `Showing lines 1-5 of 5\n1: {"conversationId":"${unrelatedB}"}`,
+      },
+      {
+        step_index: 3,
+        type: 'GENERIC',
+        content: JSON.stringify({
+          messages: [{ seq: 1, text: `"conversationId":"${unrelatedC}"` }],
+          head: 1,
+        }),
+      },
+    ];
+    fs.writeFileSync(filePath, lines.map((l) => JSON.stringify(l)).join('\n') + '\n', 'utf8');
+
+    syncTranscriptState(state);
+    expect(state.childIds).toEqual([]);
   });
 });

@@ -5,12 +5,19 @@ import { fmtExact, fmtPct, fmtTokens } from '../utils/format';
 interface ContextCardProps {
   contextWindow: ContextWindowStats | null;
   model: string;
+  activeScope: string;
+  activeScopeLabel: string;
   onSaveLimit: (model: string, limitTokens: number) => Promise<void>;
 }
+
+const RING_RADIUS = 32;
+const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
 export function ContextCard({
   contextWindow,
   model,
+  activeScope,
+  activeScopeLabel,
   onSaveLimit,
 }: ContextCardProps) {
   const [editing, setEditing] = useState(false);
@@ -25,6 +32,13 @@ export function ContextCard({
       inputRef.current?.select();
     }
   }, [editing]);
+
+  const scopeTag =
+    activeScope === 'all'
+      ? '· 主会话'
+      : activeScope !== 'main'
+        ? `· ${activeScopeLabel}`
+        : null;
 
   const openEditor = () => {
     if (!contextWindow) return;
@@ -53,25 +67,30 @@ export function ContextCard({
 
   if (!contextWindow) {
     return (
-      <section class="agy-card rounded-xl p-4 space-y-2.5">
+      <section class="agy-card p-3.5 space-y-2">
         <div class="flex items-center justify-between gap-2">
-          <div class="flex items-center gap-2">
-            <h2 class="text-[14px] font-semibold tracking-tight">
-              上下文窗口占用
+          <div class="flex items-center gap-1.5 min-w-0">
+            <h2 class="text-[13px] font-semibold tracking-tight">
+              上下文窗口
             </h2>
-            <span class="text-[13px]" style={{ color: 'var(--agy-muted)' }}>
-              · 主会话
-            </span>
+            {scopeTag && (
+              <span
+                class="text-[12px] truncate"
+                style={{ color: 'var(--agy-muted)' }}
+              >
+                {scopeTag}
+              </span>
+            )}
           </div>
           <span
-            class="text-2xl font-bold tabular-nums"
+            class="text-[14px] font-semibold tabular-nums"
             style={{ color: 'var(--agy-muted)' }}
           >
             --
           </span>
         </div>
-        <p class="text-[13.5px]" style={{ color: 'var(--agy-muted)' }}>
-          等待主会话首轮模型响应...
+        <p class="text-[12px]" style={{ color: 'var(--agy-muted)' }}>
+          等待首轮模型响应...
         </p>
       </section>
     );
@@ -81,36 +100,34 @@ export function ContextCard({
     contextWindow.limitTokens > 0 ? contextWindow.limitTokens : 256_000;
   const usagePct = Math.min(100, Math.max(0, contextWindow.usagePercent));
   const cachePct = Math.min(
-    100,
-    (contextWindow.cacheReadTokens / safeLimit) * 100,
-  );
-  const inputPct = Math.min(
-    100 - cachePct,
-    (contextWindow.inputTokens / safeLimit) * 100,
+    usagePct,
+    Math.max(0, (contextWindow.cacheReadTokens / safeLimit) * 100),
   );
 
-  // Calm blue in normal range; shift to amber/red only on real pressure
-  let statusColor = 'var(--agy-primary)';
-  if (usagePct >= 80) statusColor = 'var(--agy-error)';
-  else if (usagePct >= 60) statusColor = 'var(--agy-warning)';
+  const totalOffset = RING_CIRCUMFERENCE * (1 - usagePct / 100);
+  const cacheOffset = RING_CIRCUMFERENCE * (1 - cachePct / 100);
 
-  const cacheColor =
-    usagePct >= 60 ? statusColor : 'var(--agy-primary)';
-  const inputColor =
-    usagePct >= 60
-      ? `color-mix(in srgb, ${statusColor} 50%, var(--agy-secondary))`
-      : 'color-mix(in srgb, var(--agy-primary) 42%, var(--agy-secondary))';
+  const hasPressure = usagePct >= 60;
+  const accentColor =
+    usagePct >= 80
+      ? 'var(--agy-error)'
+      : usagePct >= 60
+        ? 'var(--agy-warning)'
+        : 'var(--agy-primary)';
+  const pctColor = hasPressure ? accentColor : 'var(--agy-fg)';
+  const softTint = `color-mix(in srgb, ${accentColor} 32%, transparent)`;
+  const inputDotTint = `color-mix(in srgb, ${accentColor} 35%, transparent)`;
 
   let alertBanner: { type: 'error' | 'success'; text: string } | null = null;
   if (usagePct >= 80) {
     alertBanner = {
       type: 'error',
-      text: `主会话上下文已达 ${fmtPct(usagePct)}（下轮预估 ${fmtPct(contextWindow.estimatedNextPercent)}），建议尽快执行 /compact 压缩历史。`,
+      text: `上下文已达 ${fmtPct(usagePct)}（下轮预估 ${fmtPct(contextWindow.estimatedNextPercent)}），建议尽快执行 /compact 压缩历史。`,
     };
   } else if (contextWindow.lastCompactedStep !== null) {
     const prevText =
       contextWindow.previousPromptBeforeCompact !== null
-        ? `，主窗口已从 ${fmtTokens(contextWindow.previousPromptBeforeCompact)} 回落至 ${fmtTokens(contextWindow.promptTokens)}`
+        ? `，已从 ${fmtTokens(contextWindow.previousPromptBeforeCompact)} 回落至 ${fmtTokens(contextWindow.promptTokens)}`
         : '';
     alertBanner = {
       type: 'success',
@@ -119,195 +136,187 @@ export function ContextCard({
   }
 
   return (
-    <section class="agy-card rounded-xl p-4 space-y-3">
-      <div class="flex items-baseline justify-between gap-2">
-        <div class="flex items-center gap-2">
-          <h2 class="text-[14px] font-semibold tracking-tight">
-            上下文窗口占用
-          </h2>
-          <span
-            class="text-[12.5px]"
-            style={{ color: 'var(--agy-muted)' }}
-          >
-            主会话
-          </span>
+    <section class="agy-card p-3.5 space-y-2.5">
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-1.5 min-w-0">
+          <h2 class="text-[13px] font-semibold tracking-tight">上下文窗口</h2>
+          {scopeTag && (
+            <span
+              class="text-[12px] truncate"
+              style={{ color: 'var(--agy-muted)' }}
+            >
+              {scopeTag}
+            </span>
+          )}
         </div>
-        <span
-          class="text-[28px] leading-none font-bold tabular-nums tracking-tight"
-          style={{ color: statusColor }}
+
+        <button
+          type="button"
+          onClick={openEditor}
+          title="点击自定义该模型的上下文上限"
+          class="inline-flex items-center gap-1 rounded-[4px] px-1 py-0.5 text-[12px] font-medium tabular-nums shrink-0 transition-colors hover:bg-[var(--agy-hover)]"
+          style={{ color: 'var(--agy-primary)' }}
         >
-          {fmtPct(usagePct)}
-        </span>
+          <span>{fmtTokens(contextWindow.limitTokens)} 上限</span>
+          <span aria-hidden="true">✎</span>
+        </button>
       </div>
 
-      {/* Clean segmented progress bar */}
-      <div class="space-y-2">
-        <div
-          class="w-full h-3 rounded-full overflow-hidden flex"
-          style={{ backgroundColor: 'var(--agy-secondary)' }}
-        >
-          {cachePct > 0 && (
-            <div
-              class="bar-fill h-full"
-              style={{
-                width: `${cachePct}%`,
-                backgroundColor: cacheColor,
-              }}
+      <div class="flex items-center gap-4">
+        {/* 72x72 restrained Antigravity-native layered ring gauge */}
+        <div class="relative w-[72px] h-[72px] shrink-0">
+          <svg viewBox="0 0 80 80" class="w-full h-full -rotate-90 block">
+            <circle
+              cx="40"
+              cy="40"
+              r={RING_RADIUS}
+              fill="none"
+              stroke="color-mix(in srgb, var(--agy-fg) 9%, transparent)"
+              stroke-width="5"
             />
-          )}
-          {inputPct > 0 && (
-            <div
-              class="bar-fill h-full"
-              style={{
-                width: `${inputPct}%`,
-                backgroundColor: inputColor,
-              }}
-            />
-          )}
-        </div>
-
-        <div
-          class="flex items-center justify-between text-[13px] tabular-nums gap-2 flex-wrap"
-          style={{ color: 'var(--agy-muted)' }}
-        >
-          <div class="flex items-center gap-3">
-            <span class="inline-flex items-center gap-1.5">
-              <span
-                class="w-2.5 h-2.5 rounded-full inline-block"
-                style={{ backgroundColor: cacheColor }}
+            {usagePct > 0 && (
+              <circle
+                class="agy-ring-progress"
+                cx="40"
+                cy="40"
+                r={RING_RADIUS}
+                fill="none"
+                stroke={softTint}
+                stroke-width="5"
+                stroke-linecap="round"
+                stroke-dasharray={RING_CIRCUMFERENCE.toFixed(2)}
+                stroke-dashoffset={totalOffset.toFixed(2)}
               />
-              <span>
-                缓存{' '}
-                <strong
-                  class="font-semibold"
-                  style={{ color: 'var(--agy-fg)' }}
-                >
-                  {fmtTokens(contextWindow.cacheReadTokens)}
-                </strong>
-              </span>
-            </span>
-            <span class="inline-flex items-center gap-1.5">
-              <span
-                class="w-2.5 h-2.5 rounded-full inline-block"
-                style={{ backgroundColor: inputColor }}
+            )}
+            {cachePct > 0 && (
+              <circle
+                class="agy-ring-progress"
+                cx="40"
+                cy="40"
+                r={RING_RADIUS}
+                fill="none"
+                stroke={accentColor}
+                stroke-width="5"
+                stroke-linecap="round"
+                stroke-dasharray={RING_CIRCUMFERENCE.toFixed(2)}
+                stroke-dashoffset={cacheOffset.toFixed(2)}
               />
-              <span>
-                新增{' '}
-                <strong
-                  class="font-semibold"
-                  style={{ color: 'var(--agy-fg)' }}
-                >
-                  {fmtTokens(contextWindow.inputTokens)}
-                </strong>
-              </span>
+            )}
+          </svg>
+          <div class="absolute inset-0 flex items-center justify-center">
+            <span
+              class="text-[14.5px] font-semibold tabular-nums leading-none"
+              style={{ color: pctColor }}
+            >
+              {fmtPct(usagePct)}
             </span>
           </div>
+        </div>
 
-          <div class="flex items-center gap-1 shrink-0">
-            <span class="font-semibold" style={{ color: 'var(--agy-fg)' }}>
+        {/* Right column metrics */}
+        <div class="flex-1 min-w-0 space-y-2 tabular-nums">
+          <div>
+            <div class="text-[11.5px]" style={{ color: 'var(--agy-muted)' }}>
+              当前上下文
+            </div>
+            <div
+              class="text-[19px] font-semibold leading-tight tracking-tight"
+              style={{ color: 'var(--agy-fg)' }}
+            >
               {fmtTokens(contextWindow.promptTokens)}
+            </div>
+          </div>
+
+          <div class="flex items-center gap-3 text-[12px] flex-wrap">
+            <span class="inline-flex items-center gap-1.5">
+              <span
+                class="w-1.5 h-1.5 rounded-full inline-block"
+                style={{ backgroundColor: accentColor }}
+              />
+              <span style={{ color: 'var(--agy-muted)' }}>缓存</span>
+              <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
+                {fmtTokens(contextWindow.cacheReadTokens)}
+              </strong>
             </span>
-            <span>/</span>
+            <span class="inline-flex items-center gap-1.5">
+              <span
+                class="w-1.5 h-1.5 rounded-full inline-block"
+                style={{ backgroundColor: inputDotTint }}
+              />
+              <span style={{ color: 'var(--agy-muted)' }}>新增</span>
+              <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
+                {fmtTokens(contextWindow.inputTokens)}
+              </strong>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {editing && (
+        <div class="pt-1 space-y-1.5">
+          <div class="flex items-center gap-1.5">
+            <input
+              ref={inputRef}
+              type="number"
+              step="1000"
+              min="8000"
+              value={limitInput}
+              onInput={(e) =>
+                setLimitInput((e.currentTarget as HTMLInputElement).value)
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void handleSave();
+                else if (e.key === 'Escape') setEditing(false);
+              }}
+              placeholder="输入窗口上限 (tokens)"
+              class="agy-input flex-1 min-w-0 tabular-nums"
+            />
             <button
               type="button"
-              onClick={openEditor}
-              title="点击自定义该模型的上下文上限"
-              class="inline-flex items-center gap-1 hover:underline font-semibold cursor-pointer"
-              style={{ color: 'var(--agy-link)' }}
+              disabled={saving}
+              onClick={() => void handleSave()}
+              class="h-[30px] px-3 rounded-[6px] text-[12px] font-medium disabled:opacity-50"
+              style={{
+                backgroundColor: 'var(--agy-primary)',
+                color: 'var(--agy-primary-fg)',
+              }}
             >
-              <span>{fmtTokens(contextWindow.limitTokens)}</span>
-              <svg
-                width="12"
-                height="12"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path d="M12 20h9" />
-                <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
-              </svg>
+              {saving ? '保存中' : '保存'}
+            </button>
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => setEditing(false)}
+              class="agy-ghost-btn"
+            >
+              取消
             </button>
           </div>
+          {saveError && (
+            <p class="text-[11px]" style={{ color: 'var(--agy-error)' }}>
+              {saveError}
+            </p>
+          )}
         </div>
+      )}
 
-        {editing && (
-          <div class="pt-1 space-y-1.5">
-            <div class="flex items-center gap-2">
-              <input
-                ref={inputRef}
-                type="number"
-                step="1000"
-                min="8000"
-                value={limitInput}
-                onInput={(e) =>
-                  setLimitInput((e.currentTarget as HTMLInputElement).value)
-                }
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void handleSave();
-                  else if (e.key === 'Escape') setEditing(false);
-                }}
-                placeholder="输入窗口上限 (tokens)"
-                class="flex-1 h-8 px-2.5 rounded-lg text-[13px] tabular-nums border focus:outline-none"
-                style={{
-                  backgroundColor: 'var(--agy-bg)',
-                  color: 'var(--agy-fg)',
-                  borderColor: 'var(--agy-primary)',
-                }}
-              />
-              <button
-                type="button"
-                disabled={saving}
-                onClick={() => void handleSave()}
-                class="h-8 px-3 rounded-lg text-[13px] font-medium cursor-pointer disabled:opacity-50"
-                style={{
-                  backgroundColor: 'var(--agy-primary)',
-                  color: 'var(--agy-primary-fg)',
-                }}
-              >
-                {saving ? '保存中' : '保存'}
-              </button>
-              <button
-                type="button"
-                disabled={saving}
-                onClick={() => setEditing(false)}
-                class="h-8 px-2.5 rounded-lg text-[13px] cursor-pointer"
-                style={{
-                  backgroundColor: 'var(--agy-secondary)',
-                  color: 'var(--agy-secondary-fg)',
-                }}
-              >
-                取消
-              </button>
-            </div>
-            {saveError && (
-              <p class="text-[12.5px]" style={{ color: 'var(--agy-error)' }}>
-                {saveError}
-              </p>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Subtle footer row */}
+      {/* Footer hairline row */}
       <div
-        class="pt-2.5 border-t flex items-center justify-between text-[13px] tabular-nums"
+        class="pt-2 border-t flex items-center justify-between text-[12px] tabular-nums"
         style={{
-          borderColor: 'var(--agy-divider)',
+          borderColor: 'var(--agy-line)',
           color: 'var(--agy-muted)',
         }}
       >
         <span>
           本轮输出{' '}
-          <strong class="font-semibold" style={{ color: 'var(--agy-fg)' }}>
+          <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
             +{fmtExact(contextWindow.lastOutputTokens)}
           </strong>
         </span>
         <span>
           下轮预估{' '}
-          <strong class="font-semibold" style={{ color: 'var(--agy-fg)' }}>
+          <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
             {fmtTokens(contextWindow.estimatedNextTokens)} (
             {fmtPct(contextWindow.estimatedNextPercent)})
           </strong>
@@ -316,16 +325,16 @@ export function ContextCard({
 
       {alertBanner && (
         <div
-          class="rounded-lg px-3 py-2 text-[13px] leading-snug border"
+          class="rounded-[6px] px-3 py-2 text-[12px] leading-snug border"
           style={{
             backgroundColor:
               alertBanner.type === 'error'
-                ? 'color-mix(in srgb, var(--agy-error) 10%, var(--agy-content))'
-                : 'color-mix(in srgb, var(--agy-success) 10%, var(--agy-content))',
+                ? 'color-mix(in srgb, var(--agy-error) 8%, transparent)'
+                : 'color-mix(in srgb, var(--agy-success) 8%, transparent)',
             borderColor:
               alertBanner.type === 'error'
-                ? 'color-mix(in srgb, var(--agy-error) 35%, var(--agy-divider))'
-                : 'color-mix(in srgb, var(--agy-success) 35%, var(--agy-divider))',
+                ? 'color-mix(in srgb, var(--agy-error) 25%, transparent)'
+                : 'color-mix(in srgb, var(--agy-success) 25%, transparent)',
             color:
               alertBanner.type === 'error'
                 ? 'var(--agy-error)'

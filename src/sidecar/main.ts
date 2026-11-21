@@ -36,6 +36,14 @@ app.api(
       data && typeof data.conversationId === 'string' ? data.conversationId.trim() : '';
     const envConvId =
       typeof app.config?.conversationId === 'string' ? app.config.conversationId.trim() : '';
+    const clientRootId =
+      data && typeof data.clientRootId === 'string' ? data.clientRootId.trim() : undefined;
+    const clientSource =
+      data && typeof data.clientSource === 'string' ? data.clientSource.trim() : undefined;
+    const scope =
+      data && typeof data.scope === 'string' ? data.scope.trim() : undefined;
+    const clientScope =
+      data && typeof data.clientScope === 'string' ? data.clientScope.trim() : undefined;
     const rawVersion = data?.version;
     const parsedVersion =
       typeof rawVersion === 'number'
@@ -46,7 +54,12 @@ app.api(
 
     return buildMonitorStateResponse({
       rootId: queryRootId || undefined,
-      conversationId: queryConvId || envConvId || undefined,
+      conversationId: queryConvId || undefined,
+      envConversationId: envConvId || undefined,
+      scope: scope || undefined,
+      clientRootId,
+      clientSource,
+      clientScope,
       version:
         typeof parsedVersion === 'number' && Number.isFinite(parsedVersion)
           ? parsedVersion

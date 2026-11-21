@@ -5,6 +5,7 @@ import type {
   ContextWindowStats,
   RootSessionSummary,
   SessionRecord,
+  SubsessionSummary,
   TokenTotals,
 } from '../shared/types.js';
 import { formatModelDisplayName, resolveModelLimit } from './models.js';
@@ -18,6 +19,40 @@ import {
 
 const MAX_RECENT_ROOTS = 20;
 const MAX_BRAIN_SCAN_DIRS = 50;
+const SUBSESSION_LABEL_MAX_LEN = 24;
+
+function truncateLabel(text: string, maxLen = SUBSESSION_LABEL_MAX_LEN): string {
+  const cleaned = text.replace(/\s+/g, ' ').trim();
+  if (cleaned.length <= maxLen) return cleaned;
+  return `${cleaned.slice(0, maxLen - 1).trimEnd()}…`;
+}
+
+function buildTotalsFromStates(states: Array<ParsedTranscriptState | undefined>): TokenTotals {
+  let inputTokens = 0;
+  let cacheReadTokens = 0;
+  let outputTokens = 0;
+  let requestCount = 0;
+
+  for (const state of states) {
+    if (!state) continue;
+    inputTokens += state.totals.inputTokens;
+    cacheReadTokens += state.totals.cacheReadTokens;
+    outputTokens += state.totals.outputTokens;
+    requestCount += state.totals.requestCount;
+  }
+
+  const totalInputTokens = inputTokens + cacheReadTokens;
+  const totalTokens = totalInputTokens + outputTokens;
+
+  return {
+    inputTokens,
+    cacheReadTokens,
+    totalInputTokens,
+    outputTokens,
+    totalTokens,
+    requestCount,
+  };
+}
 
 export class SessionTreeManager {
   private readonly transcripts = new Map<string, ParsedTranscriptState>();
@@ -309,11 +344,62 @@ export class SessionTreeManager {
     return roots.slice(0, MAX_RECENT_ROOTS);
   }
 
-  buildAggregatedMetrics(
+  resolveEffectiveScope(rootId: string, scope = 'main'): string {
+    const trimmed = scope.trim();
+    if (trimmed === 'all') return 'all';
+    if (trimmed && trimmed !== 'main') {
+      const descendants = this.collectDescendants(rootId);
+      if (descendants.includes(trimmed)) {
+        return trimmed;
+      }
+    }
+    return 'main';
+  }
+
+  getSubsessions(rootId: string): SubsessionSummary[] {
+    const descendants = this.collectDescendants(rootId);
+    const indexById = new Map(descendants.map((id, idx) => [id, idx]));
+    const ordered = [...descendants].sort((a, b) => {
+      const stateA = this.transcripts.get(a);
+      const stateB = this.transcripts.get(b);
+      const timeA = stateA ? this.getCreationOrderTime(stateA) : Number.MAX_SAFE_INTEGER;
+      const timeB = stateB ? this.getCreationOrderTime(stateB) : Number.MAX_SAFE_INTEGER;
+      if (timeA !== timeB) return timeA - timeB;
+      return (indexById.get(a) ?? 0) - (indexById.get(b) ?? 0);
+    });
+
+    return ordered.map((id) => {
+      const childState = this.transcripts.get(id);
+      const parentId = this.childToParent.get(id) ?? rootId;
+      const parentLabel = this.transcripts.get(parentId)?.childLabels[id];
+      const label =
+        parentLabel ||
+        (childState?.title ? truncateLabel(childState.title) : `#${id.slice(0, 6)}`);
+      const model = childState?.latestModel || 'unknown';
+      const totals = buildTotalsFromStates([childState]);
+
+      return {
+        id,
+        label,
+        model,
+        modelDisplayName: formatModelDisplayName(model),
+        totalTokens: totals.totalTokens,
+        requestCount: totals.requestCount,
+        updatedAt: Math.floor(childState?.mtimeMs ?? 0),
+        parentId,
+      };
+    });
+  }
+
+  buildMetricsForScope(
     rootId: string,
     userLimits: Record<string, number>,
     fallbackModel?: string,
+    scope = 'main',
   ): {
+    activeScope: string;
+    activeScopeLabel: string;
+    subsessions: SubsessionSummary[];
     model: string;
     modelDisplayName: string;
     subagentCount: number;
@@ -324,39 +410,35 @@ export class SessionTreeManager {
     transcriptError?: string;
   } {
     const rootState = this.transcripts.get(rootId);
-    const descendants = this.collectDescendants(rootId);
-    const model = rootState?.latestModel || fallbackModel || 'unknown';
+    const subsessions = this.getSubsessions(rootId);
+    const descendants = subsessions.map((s) => s.id);
+    const effectiveScope = this.resolveEffectiveScope(rootId, scope);
+
+    const isChildScope = effectiveScope !== 'main' && effectiveScope !== 'all';
+    const targetState = isChildScope ? this.transcripts.get(effectiveScope) : rootState;
+    const model = isChildScope
+      ? targetState?.latestModel || 'unknown'
+      : rootState?.latestModel || fallbackModel || 'unknown';
     const modelDisplayName = formatModelDisplayName(model);
 
-    // 1. Totals aggregated across root + all recursive descendants
-    let inputTokens = rootState?.totals.inputTokens ?? 0;
-    let cacheReadTokens = rootState?.totals.cacheReadTokens ?? 0;
-    let outputTokens = rootState?.totals.outputTokens ?? 0;
-    let requestCount = rootState?.totals.requestCount ?? 0;
+    const totals =
+      effectiveScope === 'all'
+        ? buildTotalsFromStates([
+            rootState,
+            ...descendants.map((id) => this.transcripts.get(id)),
+          ])
+        : buildTotalsFromStates([targetState]);
 
-    for (const childId of descendants) {
-      const child = this.transcripts.get(childId);
-      if (!child) continue;
-      inputTokens += child.totals.inputTokens;
-      cacheReadTokens += child.totals.cacheReadTokens;
-      outputTokens += child.totals.outputTokens;
-      requestCount += child.totals.requestCount;
-    }
+    const activeScopeLabel =
+      effectiveScope === 'all'
+        ? '总体'
+        : effectiveScope === 'main'
+          ? '主会话'
+          : (subsessions.find((s) => s.id === effectiveScope)?.label ??
+            `#${effectiveScope.slice(0, 6)}`);
 
-    const totalInputTokens = inputTokens + cacheReadTokens;
-    const totalTokens = totalInputTokens + outputTokens;
-
-    const totals: TokenTotals = {
-      inputTokens,
-      cacheReadTokens,
-      totalInputTokens,
-      outputTokens,
-      totalTokens,
-      requestCount,
-    };
-
-    // 2. Context window strictly from main root's latest turn
-    const turns = rootState?.turns ?? [];
+    // Context window & turn history from targetState (root for 'main'/'all', child for child scope)
+    const turns = targetState?.turns ?? [];
     const lastTurn = turns.length > 0 ? turns[turns.length - 1]! : null;
 
     let contextWindow: ContextWindowStats | null = null;
@@ -374,16 +456,18 @@ export class SessionTreeManager {
         usagePercent: limitTokens > 0 ? round1((lastTurn.promptTokens / limitTokens) * 100) : 0,
         estimatedNextPercent:
           limitTokens > 0 ? round1((estimatedNextTokens / limitTokens) * 100) : 0,
-        compactedCount: rootState?.compactedCount ?? 0,
-        lastCompactedTurn: rootState?.lastCompactedTurn ?? null,
-        lastCompactedStep: rootState?.lastCompactedStep ?? null,
-        previousPromptBeforeCompact: rootState?.previousPromptBeforeCompact ?? null,
+        compactedCount: targetState?.compactedCount ?? 0,
+        lastCompactedTurn: targetState?.lastCompactedTurn ?? null,
+        lastCompactedStep: targetState?.lastCompactedStep ?? null,
+        previousPromptBeforeCompact: targetState?.previousPromptBeforeCompact ?? null,
       };
     }
 
-    // 3. Cache stats
+    // Cache stats
     const overallHitRate =
-      totalInputTokens > 0 ? round1((cacheReadTokens / totalInputTokens) * 100) : 0;
+      totals.totalInputTokens > 0
+        ? round1((totals.cacheReadTokens / totals.totalInputTokens) * 100)
+        : 0;
     const latestTurnHitRate = lastTurn ? lastTurn.hitRate : 0;
     const isFirstTurn = turns.length <= 1;
 
@@ -403,6 +487,9 @@ export class SessionTreeManager {
     }
 
     return {
+      activeScope: effectiveScope,
+      activeScopeLabel,
+      subsessions,
       model,
       modelDisplayName,
       subagentCount: descendants.length,
@@ -416,7 +503,44 @@ export class SessionTreeManager {
         note,
       },
       history: turns,
-      transcriptError: rootState?.lastError,
+      transcriptError: targetState?.lastError,
+    };
+  }
+
+  buildAggregatedMetrics(
+    rootId: string,
+    userLimits: Record<string, number>,
+    fallbackModel?: string,
+  ): {
+    model: string;
+    modelDisplayName: string;
+    subagentCount: number;
+    contextWindow: ContextWindowStats | null;
+    totals: TokenTotals;
+    cache: CacheStats;
+    history: ParsedTranscriptState['turns'];
+    transcriptError?: string;
+  } {
+    const {
+      model,
+      modelDisplayName,
+      subagentCount,
+      contextWindow,
+      totals,
+      cache,
+      history,
+      transcriptError,
+    } = this.buildMetricsForScope(rootId, userLimits, fallbackModel, 'all');
+
+    return {
+      model,
+      modelDisplayName,
+      subagentCount,
+      contextWindow,
+      totals,
+      cache,
+      history,
+      transcriptError,
     };
   }
 }

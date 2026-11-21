@@ -17,17 +17,17 @@ import path from "node:path";
 var models_default = {
   defaultLimit: 256e3,
   exact: {
-    "gemini-4-neon-high": 1e6,
-    "gemini-4-neon-medium": 1e6,
-    "gemini-4-neon-low": 1e6,
-    "gemini-4-hydrogen-high": 1e6,
-    "gemini-4-hydrogen-medium": 1e6,
-    "gemini-4-hydrogen-low": 1e6,
-    "gemini-3-pro-high": 1e6,
-    "gemini-3-pro-low": 1e6,
-    "gemini-3-flash": 1e6,
-    "gemini-2.5-pro": 1e6,
-    "gemini-2.5-flash": 1e6,
+    "gemini-4-neon-high": 512e3,
+    "gemini-4-neon-medium": 512e3,
+    "gemini-4-neon-low": 512e3,
+    "gemini-4-hydrogen-high": 512e3,
+    "gemini-4-hydrogen-medium": 512e3,
+    "gemini-4-hydrogen-low": 512e3,
+    "gemini-3-pro-high": 512e3,
+    "gemini-3-pro-low": 512e3,
+    "gemini-3-flash": 512e3,
+    "gemini-2.5-pro": 512e3,
+    "gemini-2.5-flash": 512e3,
     "claude-sonnet-4-20250514": 2e5,
     "claude-opus-4-20250514": 2e5,
     "claude-3-7-sonnet": 2e5,
@@ -38,7 +38,7 @@ var models_default = {
     "o4-mini": 2e5
   },
   patterns: [
-    { pattern: "^gemini-", limit: 1e6 },
+    { pattern: "^gemini-", limit: 512e3 },
     { pattern: "^claude-", limit: 2e5 },
     { pattern: "^gpt-4\\.1", limit: 1e6 },
     { pattern: "^gpt-4", limit: 128e3 },
@@ -162,6 +162,67 @@ var TITLE_MAX_LEN = 40;
 var COMPACT_MIN_PREV_PROMPT = 2e4;
 var COMPACT_DROP_RATIO = 0.7;
 var CHILD_CONV_ID_REGEX = /"conversation_?[iI]d"\s*:\s*"([0-9a-fA-F-]{8,64})"/g;
+var READ_FILE_OUTPUT_REGEX = /\bShowing lines \d+-\d+ of \d+/;
+function isLikelyNonChildDump(content) {
+  if (READ_FILE_OUTPUT_REGEX.test(content)) return true;
+  if (content.includes('"active"') && content.includes('"recent"') && content.includes('"transcriptPath"')) {
+    return true;
+  }
+  if (content.includes('"messages"') && content.includes('"seq"') && content.includes('"head"')) {
+    return true;
+  }
+  return false;
+}
+function collectLabelsFromJson(node, out) {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      collectLabelsFromJson(item, out);
+    }
+    return;
+  }
+  const obj = node;
+  const rawId = typeof obj.conversation_id === "string" ? obj.conversation_id : typeof obj.conversationId === "string" ? obj.conversationId : "";
+  const rawName = typeof obj.name === "string" ? obj.name.trim() : "";
+  if (rawId && rawName && !out[rawId]) {
+    out[rawId] = rawName;
+  }
+  for (const val of Object.values(obj)) {
+    if (val && typeof val === "object") {
+      collectLabelsFromJson(val, out);
+    }
+  }
+}
+function extractChildLabelsFromContent(content) {
+  const out = {};
+  const trimmed = content.trim();
+  if (!trimmed) return out;
+  const tryParse = (raw) => {
+    try {
+      const parsed = JSON.parse(raw);
+      collectLabelsFromJson(parsed, out);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!tryParse(trimmed)) {
+    for (const line of trimmed.split("\n")) {
+      const t = line.trim();
+      if (t.startsWith("{") && t.endsWith("}")) {
+        tryParse(t);
+      }
+    }
+    if (Object.keys(out).length === 0) {
+      const firstBrace = trimmed.indexOf("{");
+      const lastBrace = trimmed.lastIndexOf("}");
+      if (firstBrace !== -1 && lastBrace > firstBrace) {
+        tryParse(trimmed.slice(firstBrace, lastBrace + 1));
+      }
+    }
+  }
+  return out;
+}
 function round1(value) {
   return Math.round(value * 10) / 10;
 }
@@ -182,6 +243,7 @@ function createEmptyTranscriptState(conversationId, transcriptPath) {
       requestCount: 0
     },
     childIds: [],
+    childLabels: {},
     compactedCount: 0,
     lastCompactedTurn: null,
     lastCompactedStep: null,
@@ -228,13 +290,24 @@ function processLine(state, line) {
   }
   if (type === "GENERIC") {
     const content = typeof obj.content === "string" ? obj.content : trimmed;
+    if (isLikelyNonChildDump(content)) {
+      return changed;
+    }
+    const labels = extractChildLabelsFromContent(content);
     CHILD_CONV_ID_REGEX.lastIndex = 0;
     let m;
     while ((m = CHILD_CONV_ID_REGEX.exec(content)) !== null) {
       const childId = m[1];
-      if (childId && childId !== state.conversationId && !state.childIds.includes(childId)) {
-        state.childIds.push(childId);
-        changed = true;
+      if (childId && childId !== state.conversationId) {
+        if (!state.childIds.includes(childId)) {
+          state.childIds.push(childId);
+          changed = true;
+        }
+        const label = labels[childId];
+        if (label && state.childLabels[childId] !== label) {
+          state.childLabels[childId] = label;
+          changed = true;
+        }
       }
     }
     return changed;
@@ -343,6 +416,35 @@ function syncTranscriptState(state) {
 // src/sidecar/session-tree.ts
 var MAX_RECENT_ROOTS = 20;
 var MAX_BRAIN_SCAN_DIRS = 50;
+var SUBSESSION_LABEL_MAX_LEN = 24;
+function truncateLabel(text, maxLen = SUBSESSION_LABEL_MAX_LEN) {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (cleaned.length <= maxLen) return cleaned;
+  return `${cleaned.slice(0, maxLen - 1).trimEnd()}\u2026`;
+}
+function buildTotalsFromStates(states) {
+  let inputTokens = 0;
+  let cacheReadTokens = 0;
+  let outputTokens = 0;
+  let requestCount = 0;
+  for (const state of states) {
+    if (!state) continue;
+    inputTokens += state.totals.inputTokens;
+    cacheReadTokens += state.totals.cacheReadTokens;
+    outputTokens += state.totals.outputTokens;
+    requestCount += state.totals.requestCount;
+  }
+  const totalInputTokens = inputTokens + cacheReadTokens;
+  const totalTokens = totalInputTokens + outputTokens;
+  return {
+    inputTokens,
+    cacheReadTokens,
+    totalInputTokens,
+    outputTokens,
+    totalTokens,
+    requestCount
+  };
+}
 var SessionTreeManager = class {
   transcripts = /* @__PURE__ */ new Map();
   parentToChildren = /* @__PURE__ */ new Map();
@@ -582,34 +684,62 @@ var SessionTreeManager = class {
     roots.sort((a, b) => b.updatedAt - a.updatedAt);
     return roots.slice(0, MAX_RECENT_ROOTS);
   }
-  buildAggregatedMetrics(rootId, userLimits, fallbackModel) {
-    const rootState = this.transcripts.get(rootId);
-    const descendants = this.collectDescendants(rootId);
-    const model = rootState?.latestModel || fallbackModel || "unknown";
-    const modelDisplayName = formatModelDisplayName(model);
-    let inputTokens = rootState?.totals.inputTokens ?? 0;
-    let cacheReadTokens = rootState?.totals.cacheReadTokens ?? 0;
-    let outputTokens = rootState?.totals.outputTokens ?? 0;
-    let requestCount = rootState?.totals.requestCount ?? 0;
-    for (const childId of descendants) {
-      const child = this.transcripts.get(childId);
-      if (!child) continue;
-      inputTokens += child.totals.inputTokens;
-      cacheReadTokens += child.totals.cacheReadTokens;
-      outputTokens += child.totals.outputTokens;
-      requestCount += child.totals.requestCount;
+  resolveEffectiveScope(rootId, scope = "main") {
+    const trimmed = scope.trim();
+    if (trimmed === "all") return "all";
+    if (trimmed && trimmed !== "main") {
+      const descendants = this.collectDescendants(rootId);
+      if (descendants.includes(trimmed)) {
+        return trimmed;
+      }
     }
-    const totalInputTokens = inputTokens + cacheReadTokens;
-    const totalTokens = totalInputTokens + outputTokens;
-    const totals = {
-      inputTokens,
-      cacheReadTokens,
-      totalInputTokens,
-      outputTokens,
-      totalTokens,
-      requestCount
-    };
-    const turns = rootState?.turns ?? [];
+    return "main";
+  }
+  getSubsessions(rootId) {
+    const descendants = this.collectDescendants(rootId);
+    const indexById = new Map(descendants.map((id, idx) => [id, idx]));
+    const ordered = [...descendants].sort((a, b) => {
+      const stateA = this.transcripts.get(a);
+      const stateB = this.transcripts.get(b);
+      const timeA = stateA ? this.getCreationOrderTime(stateA) : Number.MAX_SAFE_INTEGER;
+      const timeB = stateB ? this.getCreationOrderTime(stateB) : Number.MAX_SAFE_INTEGER;
+      if (timeA !== timeB) return timeA - timeB;
+      return (indexById.get(a) ?? 0) - (indexById.get(b) ?? 0);
+    });
+    return ordered.map((id) => {
+      const childState = this.transcripts.get(id);
+      const parentId = this.childToParent.get(id) ?? rootId;
+      const parentLabel = this.transcripts.get(parentId)?.childLabels[id];
+      const label = parentLabel || (childState?.title ? truncateLabel(childState.title) : `#${id.slice(0, 6)}`);
+      const model = childState?.latestModel || "unknown";
+      const totals = buildTotalsFromStates([childState]);
+      return {
+        id,
+        label,
+        model,
+        modelDisplayName: formatModelDisplayName(model),
+        totalTokens: totals.totalTokens,
+        requestCount: totals.requestCount,
+        updatedAt: Math.floor(childState?.mtimeMs ?? 0),
+        parentId
+      };
+    });
+  }
+  buildMetricsForScope(rootId, userLimits, fallbackModel, scope = "main") {
+    const rootState = this.transcripts.get(rootId);
+    const subsessions = this.getSubsessions(rootId);
+    const descendants = subsessions.map((s) => s.id);
+    const effectiveScope = this.resolveEffectiveScope(rootId, scope);
+    const isChildScope = effectiveScope !== "main" && effectiveScope !== "all";
+    const targetState = isChildScope ? this.transcripts.get(effectiveScope) : rootState;
+    const model = isChildScope ? targetState?.latestModel || "unknown" : rootState?.latestModel || fallbackModel || "unknown";
+    const modelDisplayName = formatModelDisplayName(model);
+    const totals = effectiveScope === "all" ? buildTotalsFromStates([
+      rootState,
+      ...descendants.map((id) => this.transcripts.get(id))
+    ]) : buildTotalsFromStates([targetState]);
+    const activeScopeLabel = effectiveScope === "all" ? "\u603B\u4F53" : effectiveScope === "main" ? "\u4E3B\u4F1A\u8BDD" : subsessions.find((s) => s.id === effectiveScope)?.label ?? `#${effectiveScope.slice(0, 6)}`;
+    const turns = targetState?.turns ?? [];
     const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null;
     let contextWindow = null;
     if (lastTurn) {
@@ -625,13 +755,13 @@ var SessionTreeManager = class {
         limitSource,
         usagePercent: limitTokens > 0 ? round1(lastTurn.promptTokens / limitTokens * 100) : 0,
         estimatedNextPercent: limitTokens > 0 ? round1(estimatedNextTokens / limitTokens * 100) : 0,
-        compactedCount: rootState?.compactedCount ?? 0,
-        lastCompactedTurn: rootState?.lastCompactedTurn ?? null,
-        lastCompactedStep: rootState?.lastCompactedStep ?? null,
-        previousPromptBeforeCompact: rootState?.previousPromptBeforeCompact ?? null
+        compactedCount: targetState?.compactedCount ?? 0,
+        lastCompactedTurn: targetState?.lastCompactedTurn ?? null,
+        lastCompactedStep: targetState?.lastCompactedStep ?? null,
+        previousPromptBeforeCompact: targetState?.previousPromptBeforeCompact ?? null
       };
     }
-    const overallHitRate = totalInputTokens > 0 ? round1(cacheReadTokens / totalInputTokens * 100) : 0;
+    const overallHitRate = totals.totalInputTokens > 0 ? round1(totals.cacheReadTokens / totals.totalInputTokens * 100) : 0;
     const latestTurnHitRate = lastTurn ? lastTurn.hitRate : 0;
     const isFirstTurn = turns.length <= 1;
     let status = "healthy";
@@ -649,6 +779,9 @@ var SessionTreeManager = class {
       note = "\u672C\u8F6E\u7F13\u5B58\u547D\u4E2D\u7387\u4F4E\u4E8E 45%\uFF0C\u53EF\u80FD\u53D1\u751F\u4E86\u7F13\u5B58\u5931\u6548\u6216\u538B\u7F29\u91CD\u5EFA";
     }
     return {
+      activeScope: effectiveScope,
+      activeScopeLabel,
+      subsessions,
       model,
       modelDisplayName,
       subagentCount: descendants.length,
@@ -662,7 +795,29 @@ var SessionTreeManager = class {
         note
       },
       history: turns,
-      transcriptError: rootState?.lastError
+      transcriptError: targetState?.lastError
+    };
+  }
+  buildAggregatedMetrics(rootId, userLimits, fallbackModel) {
+    const {
+      model,
+      modelDisplayName,
+      subagentCount,
+      contextWindow,
+      totals,
+      cache,
+      history,
+      transcriptError
+    } = this.buildMetricsForScope(rootId, userLimits, fallbackModel, "all");
+    return {
+      model,
+      modelDisplayName,
+      subagentCount,
+      contextWindow,
+      totals,
+      cache,
+      history,
+      transcriptError
     };
   }
 };
@@ -701,15 +856,46 @@ function getCandidatePluginDataDirs(appDataDir) {
 }
 function resolvePluginDataAndSessionFile() {
   const appDataDir = resolveAppDataDir();
+  const explicitPluginData = process.env.PLUGIN_DATA?.trim();
   const candidates = getCandidatePluginDataDirs(appDataDir);
-  for (const dir of candidates) {
-    const filePath = path4.join(dir, "active-session.json");
+  if (explicitPluginData) {
+    const explicitDir = path4.resolve(explicitPluginData);
+    const explicitFile = path4.join(explicitDir, "active-session.json");
     try {
-      if (fs4.existsSync(filePath)) {
-        return { appDataDir, pluginDataDir: dir, activeSessionFile: filePath, exists: true };
+      if (fs4.statSync(explicitFile).isFile()) {
+        return {
+          appDataDir,
+          pluginDataDir: explicitDir,
+          activeSessionFile: explicitFile,
+          exists: true
+        };
       }
     } catch {
     }
+  }
+  let bestMatch = null;
+  for (const dir of candidates) {
+    const filePath = path4.join(dir, "active-session.json");
+    try {
+      const stat = fs4.statSync(filePath);
+      if (!stat.isFile()) continue;
+      if (!bestMatch || stat.mtimeMs > bestMatch.mtimeMs) {
+        bestMatch = {
+          pluginDataDir: dir,
+          activeSessionFile: filePath,
+          mtimeMs: stat.mtimeMs
+        };
+      }
+    } catch {
+    }
+  }
+  if (bestMatch) {
+    return {
+      appDataDir,
+      pluginDataDir: bestMatch.pluginDataDir,
+      activeSessionFile: bestMatch.activeSessionFile,
+      exists: true
+    };
   }
   const primaryDir = candidates[0] ?? path4.join(appDataDir, "plugin_data", "agy-monitor");
   return {
@@ -813,6 +999,13 @@ var MonitorStateService = class {
         updatedAt: Date.now()
       });
     }
+    if (params.envConversationId) {
+      extraRecords.push({
+        conversationId: params.envConversationId,
+        transcriptPath: transcriptPathForConversation(appDataDir, params.envConversationId),
+        updatedAt: Date.now()
+      });
+    }
     if (params.rootId) {
       extraRecords.push({
         conversationId: params.rootId,
@@ -821,30 +1014,37 @@ var MonitorStateService = class {
       });
     }
     this.tree.sync(brainDir, extraRecords);
-    const currentVersion = this.tree.getVersion();
-    if (typeof params.version === "number" && Number.isFinite(params.version) && params.version === currentVersion) {
-      return {
-        ok: true,
-        unchanged: true,
-        version: currentVersion
-      };
-    }
     let source = "none";
     let activeRootId = null;
     let fallbackModel;
     if (params.rootId) {
       activeRootId = this.tree.resolveRootId(params.rootId);
-      source = hookData?.active ? "hook" : params.conversationId ? "pane" : "fallback";
+      source = params.conversationId ? "pane" : hookData?.active ? "hook" : params.envConversationId ? "pane" : "fallback";
+    } else if (params.conversationId) {
+      activeRootId = this.tree.resolveRootId(params.conversationId);
+      source = "pane";
     } else if (hookData?.active) {
       activeRootId = this.tree.resolveRootId(hookData.active.conversationId);
       source = "hook";
       fallbackModel = hookData.active.modelName;
-    } else if (params.conversationId) {
-      activeRootId = this.tree.resolveRootId(params.conversationId);
+    } else if (params.envConversationId) {
+      activeRootId = this.tree.resolveRootId(params.envConversationId);
       source = "pane";
     } else {
       activeRootId = this.tree.findMostRecentRootId();
       source = activeRootId ? "fallback" : "none";
+    }
+    const effectiveScope = activeRootId ? this.tree.resolveEffectiveScope(activeRootId, params.scope ?? "main") : "main";
+    const currentVersion = this.tree.getVersion();
+    const clientRootMatches = params.clientRootId === void 0 || params.clientRootId === (activeRootId ?? "");
+    const clientSourceMatches = params.clientSource === void 0 || params.clientSource === source;
+    const clientScopeMatches = params.clientScope === void 0 || params.clientScope === effectiveScope;
+    if (typeof params.version === "number" && Number.isFinite(params.version) && params.version === currentVersion && clientRootMatches && clientSourceMatches && clientScopeMatches) {
+      return {
+        ok: true,
+        unchanged: true,
+        version: currentVersion
+      };
     }
     if (!fallbackModel && activeRootId) {
       fallbackModel = hookRecords.find(
@@ -862,6 +1062,9 @@ var MonitorStateService = class {
         timestamp: Date.now(),
         source: "none",
         activeRootId: null,
+        activeScope: "main",
+        activeScopeLabel: "\u4E3B\u4F1A\u8BDD",
+        subsessions: [],
         recentRoots,
         model: "unknown",
         modelDisplayName: formatModelDisplayName("unknown"),
@@ -885,7 +1088,12 @@ var MonitorStateService = class {
         history: []
       };
     }
-    const metrics = this.tree.buildAggregatedMetrics(activeRootId, userLimits, fallbackModel);
+    const metrics = this.tree.buildMetricsForScope(
+      activeRootId,
+      userLimits,
+      fallbackModel,
+      effectiveScope
+    );
     return {
       ok: true,
       unchanged: false,
@@ -894,6 +1102,9 @@ var MonitorStateService = class {
       timestamp: Date.now(),
       source,
       activeRootId,
+      activeScope: metrics.activeScope,
+      activeScopeLabel: metrics.activeScopeLabel,
+      subsessions: metrics.subsessions,
       recentRoots,
       model: metrics.model,
       modelDisplayName: metrics.modelDisplayName,
@@ -958,11 +1169,20 @@ app.api(
     const queryRootId = data && typeof data.rootId === "string" ? data.rootId.trim() : "";
     const queryConvId = data && typeof data.conversationId === "string" ? data.conversationId.trim() : "";
     const envConvId = typeof app.config?.conversationId === "string" ? app.config.conversationId.trim() : "";
+    const clientRootId = data && typeof data.clientRootId === "string" ? data.clientRootId.trim() : void 0;
+    const clientSource = data && typeof data.clientSource === "string" ? data.clientSource.trim() : void 0;
+    const scope = data && typeof data.scope === "string" ? data.scope.trim() : void 0;
+    const clientScope = data && typeof data.clientScope === "string" ? data.clientScope.trim() : void 0;
     const rawVersion = data?.version;
     const parsedVersion = typeof rawVersion === "number" ? rawVersion : typeof rawVersion === "string" && rawVersion.trim() !== "" ? Number(rawVersion) : void 0;
     return buildMonitorStateResponse({
       rootId: queryRootId || void 0,
-      conversationId: queryConvId || envConvId || void 0,
+      conversationId: queryConvId || void 0,
+      envConversationId: envConvId || void 0,
+      scope: scope || void 0,
+      clientRootId,
+      clientSource,
+      clientScope,
       version: typeof parsedVersion === "number" && Number.isFinite(parsedVersion) ? parsedVersion : void 0
     });
   },

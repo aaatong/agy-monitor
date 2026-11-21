@@ -1,27 +1,50 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
   <defs>
-    <linearGradient id="bgGrad" x1="28" y1="24" x2="228" y2="232" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#1b2232"/>
-      <stop offset="100%" stop-color="#111621"/>
+    <linearGradient id="agyLogoArch" x1="42" y1="150" x2="214" y2="106" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="35%" stop-color="#3186ff"/>
+      <stop offset="70%" stop-color="#4da3e8"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
     </linearGradient>
-    <linearGradient id="arcGrad" x1="68" y1="178" x2="196" y2="96" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#5b9cf6"/>
-      <stop offset="100%" stop-color="#3fb98f"/>
+    <linearGradient id="agyLogoPulse" x1="90" y1="154" x2="166" y2="154" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0ea5e9"/>
+      <stop offset="55%" stop-color="#14b8a6"/>
+      <stop offset="100%" stop-color="#2dd4bf"/>
     </linearGradient>
+    <radialGradient id="agyLogoNode" cx="195" cy="50" r="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#7dd3fc"/>
+      <stop offset="52%" stop-color="#3186ff"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </radialGradient>
   </defs>
 
-  <!-- 10% outer safe margin -->
-  <rect x="26" y="26" width="204" height="204" rx="46" fill="url(#bgGrad)"/>
-  <rect x="27.5" y="27.5" width="201" height="201" rx="44.5" stroke="#334155" stroke-width="3"/>
+  <!-- Sculpted levitating arch-delta silhouette (~12% safe margin, transparent canvas) -->
+  <path
+    d="M 128 34
+       C 102 34 82 64 66 114
+       C 51 160 40 186 40 204
+       C 40 216 49 222 59 222
+       C 69 222 75 215 79 202
+       C 88 164 102 110 112 86
+       C 118 73 123 70 128 70
+       C 133 70 138 73 144 86
+       C 154 110 168 164 177 202
+       C 181 215 187 222 197 222
+       C 207 222 216 216 216 204
+       C 216 186 205 160 190 114
+       C 174 64 154 34 128 34 Z"
+    fill="url(#agyLogoArch)"
+  />
 
-  <!-- Subtle gauge track -->
-  <path d="M 75.7 178.3 A 74 74 0 1 1 180.3 178.3" stroke="#2a3447" stroke-width="14" stroke-linecap="round"/>
+  <!-- Telemetry pulse crossbar in the arch's negative space -->
+  <path
+    d="M 92 156 L 106 156 L 118 124 L 134 180 L 147 142 L 156 156 L 166 156"
+    stroke="url(#agyLogoPulse)"
+    stroke-width="14"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
 
-  <!-- Active blue-to-teal gauge arc -->
-  <path d="M 75.7 178.3 A 74 74 0 1 1 196.4 99.6" stroke="url(#arcGrad)" stroke-width="14" stroke-linecap="round"/>
-
-  <!-- Clean pulse waveform -->
-  <path d="M 72 138 L 98 138 L 111 106 L 128 156 L 145 118 L 157 138 L 184 138"
-        stroke="#e2e8f0" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="196.4" cy="99.6" r="6" fill="#3fb98f"/>
+  <!-- Floating orbital telemetry node -->
+  <circle cx="198" cy="54" r="12" fill="url(#agyLogoNode)"/>
 </svg>

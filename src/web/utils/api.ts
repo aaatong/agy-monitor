@@ -14,6 +14,10 @@ export interface FetchStateParams {
   version?: number;
   conversationId?: string;
   rootId?: string;
+  scope?: string;
+  clientRootId?: string;
+  clientSource?: string;
+  clientScope?: string;
 }
 
 export async function fetchMonitorState(
@@ -22,12 +26,24 @@ export async function fetchMonitorState(
   const qs = new URLSearchParams();
   if (params.version !== undefined) {
     qs.set('version', String(params.version));
+    if (params.clientRootId !== undefined) {
+      qs.set('clientRootId', params.clientRootId);
+    }
+    if (params.clientSource !== undefined) {
+      qs.set('clientSource', params.clientSource);
+    }
+    if (params.clientScope !== undefined) {
+      qs.set('clientScope', params.clientScope);
+    }
   }
   if (params.conversationId) {
     qs.set('conversationId', params.conversationId);
   }
   if (params.rootId) {
     qs.set('rootId', params.rootId);
+  }
+  if (params.scope) {
+    qs.set('scope', params.scope);
   }
   const query = qs.toString();
   const path = query ? `/api/state?${query}` : '/api/state';

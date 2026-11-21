@@ -1,128 +1,77 @@
-import type { CacheStats, TokenTotals } from '../../shared/types';
-import { fmtPct, fmtTokens } from '../utils/format';
+import type { CacheStats } from '../../shared/types';
+import { fmtPct } from '../utils/format';
 
 interface CacheCardProps {
   cache: CacheStats;
-  totals: TokenTotals;
 }
 
-export function CacheCard({ cache, totals }: CacheCardProps) {
-  let pillText = '缓存健康';
-  let pillColor = 'var(--agy-teal)';
+export function CacheCard({ cache }: CacheCardProps) {
+  let statusText = '缓存健康';
+  let statusColor = 'var(--agy-success)';
 
   if (cache.isFirstTurn) {
-    pillText = '首轮冷启动';
-    pillColor = 'var(--agy-muted)';
+    statusText = '首轮冷启动';
+    statusColor = 'var(--agy-muted)';
   } else if (cache.status === 'healthy' || cache.latestTurnHitRate >= 75) {
-    pillText = '缓存健康';
-    pillColor = 'var(--agy-teal)';
+    statusText = '缓存健康';
+    statusColor = 'var(--agy-success)';
   } else if (cache.status === 'low' || cache.latestTurnHitRate >= 45) {
-    pillText = '命中偏低';
-    pillColor = 'var(--agy-warning)';
+    statusText = '命中偏低';
+    statusColor = 'var(--agy-warning)';
   } else {
-    pillText = '缓存失效 / 重建中';
-    pillColor = 'var(--agy-error)';
+    statusText = '缓存失效 / 重建中';
+    statusColor = 'var(--agy-error)';
   }
 
   const ratioWidth = Math.min(100, Math.max(0, cache.overallHitRate));
+  const barColor = cache.isFirstTurn ? 'var(--agy-primary)' : statusColor;
 
   return (
-    <section class="agy-card rounded-xl p-4 space-y-3">
+    <section class="agy-card p-3.5 space-y-2.5">
       <div class="flex items-center justify-between gap-2">
-        <h2 class="text-[14px] font-semibold tracking-tight">
-          Prompt 缓存命中率
-        </h2>
-
+        <h2 class="text-[13px] font-semibold tracking-tight">缓存命中率</h2>
         <span
-          class="px-2.5 py-0.5 rounded-full text-[12px] font-medium"
-          style={{
-            backgroundColor: `color-mix(in srgb, ${pillColor} 12%, transparent)`,
-            color: pillColor,
-            border: `1px solid color-mix(in srgb, ${pillColor} 32%, transparent)`,
-          }}
+          class="text-[12px] font-medium"
+          style={{ color: statusColor }}
         >
-          {pillText}
+          {statusText}
         </span>
       </div>
 
-      <div class="flex items-end justify-between gap-3">
-        <div>
-          <div
-            class="text-[30px] font-bold leading-none tabular-nums tracking-tight"
-            style={{ color: 'var(--agy-teal)' }}
-          >
-            {fmtPct(cache.overallHitRate)}
-          </div>
-          <div
-            class="mt-1.5 text-[13px]"
-            style={{ color: 'var(--agy-muted)' }}
-          >
-            会话累计（主 + 子汇总）
-          </div>
-        </div>
-
-        <div
-          class="rounded-lg px-3 py-2 text-right shrink-0 border"
-          style={{
-            backgroundColor: 'var(--agy-content)',
-            borderColor: 'var(--agy-divider)',
-          }}
+      <div class="flex items-baseline justify-between gap-2 tabular-nums">
+        <span
+          class="text-[22px] leading-none font-semibold"
+          style={{ color: 'var(--agy-fg)' }}
         >
-          <div class="text-[12px]" style={{ color: 'var(--agy-muted)' }}>
-            主会话最新一轮
-          </div>
-          <div
-            class="mt-0.5 text-[18px] font-bold leading-tight tabular-nums"
-            style={{ color: cache.isFirstTurn ? 'var(--agy-fg)' : pillColor }}
-          >
+          {fmtPct(cache.overallHitRate)}
+        </span>
+        <span class="text-[12px]" style={{ color: 'var(--agy-muted)' }}>
+          最新一轮{' '}
+          <strong class="font-semibold" style={{ color: 'var(--agy-fg)' }}>
             {fmtPct(cache.latestTurnHitRate)}
-          </div>
-        </div>
+          </strong>
+        </span>
       </div>
 
-      {/* Single calm teal progress bar on neutral track */}
-      <div class="space-y-1.5">
-        <div
-          class="w-full h-2.5 rounded-full overflow-hidden flex"
-          style={{ backgroundColor: 'var(--agy-secondary)' }}
-        >
-          {ratioWidth > 0 && (
-            <div
-              class="bar-fill h-full rounded-full"
-              style={{
-                width: `${ratioWidth}%`,
-                backgroundColor: 'var(--agy-teal)',
-              }}
-            />
-          )}
-        </div>
-        <div
-          class="flex items-center justify-between text-[13px] tabular-nums"
-          style={{ color: 'var(--agy-muted)' }}
-        >
-          <span>
-            命中{' '}
-            <strong class="font-semibold" style={{ color: 'var(--agy-fg)' }}>
-              {fmtTokens(totals.cacheReadTokens)}
-            </strong>
-          </span>
-          <span>
-            未命中{' '}
-            <strong class="font-semibold" style={{ color: 'var(--agy-fg)' }}>
-              {fmtTokens(totals.inputTokens)}
-            </strong>
-          </span>
-        </div>
+      <div
+        class="w-full h-1.5 rounded-full overflow-hidden flex"
+        style={{ backgroundColor: 'var(--agy-fill)' }}
+      >
+        {ratioWidth > 0 && (
+          <div
+            class="bar-fill h-full rounded-full"
+            style={{
+              width: `${ratioWidth}%`,
+              backgroundColor: barColor,
+            }}
+          />
+        )}
       </div>
 
       {cache.note && (
         <div
-          class="rounded-lg px-3 py-2 text-[13px] leading-snug border"
-          style={{
-            backgroundColor: 'var(--agy-content)',
-            borderColor: 'var(--agy-divider)',
-            color: 'var(--agy-muted)',
-          }}
+          class="text-[11px] leading-snug"
+          style={{ color: 'var(--agy-muted)' }}
         >
           {cache.note}
         </div>

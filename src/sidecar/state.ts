@@ -58,17 +58,56 @@ export function resolvePluginDataAndSessionFile(): {
   exists: boolean;
 } {
   const appDataDir = resolveAppDataDir();
+  const explicitPluginData = process.env.PLUGIN_DATA?.trim();
   const candidates = getCandidatePluginDataDirs(appDataDir);
+
+  if (explicitPluginData) {
+    const explicitDir = path.resolve(explicitPluginData);
+    const explicitFile = path.join(explicitDir, 'active-session.json');
+    try {
+      if (fs.statSync(explicitFile).isFile()) {
+        return {
+          appDataDir,
+          pluginDataDir: explicitDir,
+          activeSessionFile: explicitFile,
+          exists: true,
+        };
+      }
+    } catch {
+      // Fall through to candidate scan
+    }
+  }
+
+  let bestMatch: {
+    pluginDataDir: string;
+    activeSessionFile: string;
+    mtimeMs: number;
+  } | null = null;
 
   for (const dir of candidates) {
     const filePath = path.join(dir, 'active-session.json');
     try {
-      if (fs.existsSync(filePath)) {
-        return { appDataDir, pluginDataDir: dir, activeSessionFile: filePath, exists: true };
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile()) continue;
+      if (!bestMatch || stat.mtimeMs > bestMatch.mtimeMs) {
+        bestMatch = {
+          pluginDataDir: dir,
+          activeSessionFile: filePath,
+          mtimeMs: stat.mtimeMs,
+        };
       }
     } catch {
-      // ignore permission errors on fallback candidates
+      // ignore missing / permission errors on fallback candidates
     }
+  }
+
+  if (bestMatch) {
+    return {
+      appDataDir,
+      pluginDataDir: bestMatch.pluginDataDir,
+      activeSessionFile: bestMatch.activeSessionFile,
+      exists: true,
+    };
   }
 
   const primaryDir = candidates[0] ?? path.join(appDataDir, 'plugin_data', 'agy-monitor');
@@ -150,7 +189,12 @@ function inferBrainDir(appDataDir: string, records: SessionRecord[]): string {
 export interface StateQueryParams {
   rootId?: string;
   conversationId?: string;
+  envConversationId?: string;
+  scope?: string;
   version?: number;
+  clientRootId?: string;
+  clientSource?: string;
+  clientScope?: string;
 }
 
 export class MonitorStateService {
@@ -205,6 +249,13 @@ export class MonitorStateService {
         updatedAt: Date.now(),
       });
     }
+    if (params.envConversationId) {
+      extraRecords.push({
+        conversationId: params.envConversationId,
+        transcriptPath: transcriptPathForConversation(appDataDir, params.envConversationId),
+        updatedAt: Date.now(),
+      });
+    }
     if (params.rootId) {
       extraRecords.push({
         conversationId: params.rootId,
@@ -215,37 +266,60 @@ export class MonitorStateService {
 
     this.tree.sync(brainDir, extraRecords);
 
-    const currentVersion = this.tree.getVersion();
-    if (
-      typeof params.version === 'number' &&
-      Number.isFinite(params.version) &&
-      params.version === currentVersion
-    ) {
-      return {
-        ok: true,
-        unchanged: true,
-        version: currentVersion,
-      };
-    }
-
     let source: SessionSource = 'none';
     let activeRootId: string | null = null;
     let fallbackModel: string | undefined;
 
     if (params.rootId) {
       activeRootId = this.tree.resolveRootId(params.rootId);
-      source = hookData?.active ? 'hook' : params.conversationId ? 'pane' : 'fallback';
+      source = params.conversationId
+        ? 'pane'
+        : hookData?.active
+          ? 'hook'
+          : params.envConversationId
+            ? 'pane'
+            : 'fallback';
+    } else if (params.conversationId) {
+      activeRootId = this.tree.resolveRootId(params.conversationId);
+      source = 'pane';
     } else if (hookData?.active) {
       // Anti-hijack: if hook fired for a subagent/swarm child, resolve upward to its root
       activeRootId = this.tree.resolveRootId(hookData.active.conversationId);
       source = 'hook';
       fallbackModel = hookData.active.modelName;
-    } else if (params.conversationId) {
-      activeRootId = this.tree.resolveRootId(params.conversationId);
+    } else if (params.envConversationId) {
+      activeRootId = this.tree.resolveRootId(params.envConversationId);
       source = 'pane';
     } else {
       activeRootId = this.tree.findMostRecentRootId();
       source = activeRootId ? 'fallback' : 'none';
+    }
+
+    const effectiveScope = activeRootId
+      ? this.tree.resolveEffectiveScope(activeRootId, params.scope ?? 'main')
+      : 'main';
+
+    const currentVersion = this.tree.getVersion();
+    const clientRootMatches =
+      params.clientRootId === undefined || params.clientRootId === (activeRootId ?? '');
+    const clientSourceMatches =
+      params.clientSource === undefined || params.clientSource === source;
+    const clientScopeMatches =
+      params.clientScope === undefined || params.clientScope === effectiveScope;
+
+    if (
+      typeof params.version === 'number' &&
+      Number.isFinite(params.version) &&
+      params.version === currentVersion &&
+      clientRootMatches &&
+      clientSourceMatches &&
+      clientScopeMatches
+    ) {
+      return {
+        ok: true,
+        unchanged: true,
+        version: currentVersion,
+      };
     }
 
     if (!fallbackModel && activeRootId) {
@@ -266,6 +340,9 @@ export class MonitorStateService {
         timestamp: Date.now(),
         source: 'none',
         activeRootId: null,
+        activeScope: 'main',
+        activeScopeLabel: '主会话',
+        subsessions: [],
         recentRoots,
         model: 'unknown',
         modelDisplayName: formatModelDisplayName('unknown'),
@@ -290,7 +367,12 @@ export class MonitorStateService {
       };
     }
 
-    const metrics = this.tree.buildAggregatedMetrics(activeRootId, userLimits, fallbackModel);
+    const metrics = this.tree.buildMetricsForScope(
+      activeRootId,
+      userLimits,
+      fallbackModel,
+      effectiveScope,
+    );
 
     return {
       ok: true,
@@ -300,6 +382,9 @@ export class MonitorStateService {
       timestamp: Date.now(),
       source,
       activeRootId,
+      activeScope: metrics.activeScope,
+      activeScopeLabel: metrics.activeScopeLabel,
+      subsessions: metrics.subsessions,
       recentRoots,
       model: metrics.model,
       modelDisplayName: metrics.modelDisplayName,

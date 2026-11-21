@@ -24,6 +24,26 @@ const COMPACT_MIN_PREV_PROMPT = 20_000;
 const COMPACT_DROP_RATIO = 0.7;
 
 const CHILD_CONV_ID_REGEX = /"conversation_?[iI]d"\s*:\s*"([0-9a-fA-F-]{8,64})"/g;
+const READ_FILE_OUTPUT_REGEX = /\bShowing lines \d+-\d+ of \d+/;
+
+function isLikelyNonChildDump(content: string): boolean {
+  if (READ_FILE_OUTPUT_REGEX.test(content)) return true;
+  if (
+    content.includes('"active"') &&
+    content.includes('"recent"') &&
+    content.includes('"transcriptPath"')
+  ) {
+    return true;
+  }
+  if (
+    content.includes('"messages"') &&
+    content.includes('"seq"') &&
+    content.includes('"head"')
+  ) {
+    return true;
+  }
+  return false;
+}
 
 export interface TranscriptTotals {
   inputTokens: number;
@@ -43,11 +63,72 @@ export interface ParsedTranscriptState {
   turns: TurnHistoryPoint[];
   totals: TranscriptTotals;
   childIds: string[];
+  childLabels: Record<string, string>;
   compactedCount: number;
   lastCompactedTurn: number | null;
   lastCompactedStep: number | null;
   previousPromptBeforeCompact: number | null;
   lastError?: string;
+}
+
+function collectLabelsFromJson(node: unknown, out: Record<string, string>): void {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      collectLabelsFromJson(item, out);
+    }
+    return;
+  }
+  const obj = node as Record<string, unknown>;
+  const rawId =
+    typeof obj.conversation_id === 'string'
+      ? obj.conversation_id
+      : typeof obj.conversationId === 'string'
+        ? obj.conversationId
+        : '';
+  const rawName = typeof obj.name === 'string' ? obj.name.trim() : '';
+  if (rawId && rawName && !out[rawId]) {
+    out[rawId] = rawName;
+  }
+  for (const val of Object.values(obj)) {
+    if (val && typeof val === 'object') {
+      collectLabelsFromJson(val, out);
+    }
+  }
+}
+
+function extractChildLabelsFromContent(content: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const trimmed = content.trim();
+  if (!trimmed) return out;
+
+  const tryParse = (raw: string): boolean => {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      collectLabelsFromJson(parsed, out);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  if (!tryParse(trimmed)) {
+    for (const line of trimmed.split('\n')) {
+      const t = line.trim();
+      if (t.startsWith('{') && t.endsWith('}')) {
+        tryParse(t);
+      }
+    }
+    if (Object.keys(out).length === 0) {
+      const firstBrace = trimmed.indexOf('{');
+      const lastBrace = trimmed.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace > firstBrace) {
+        tryParse(trimmed.slice(firstBrace, lastBrace + 1));
+      }
+    }
+  }
+
+  return out;
 }
 
 export function round1(value: number): number {
@@ -74,6 +155,7 @@ export function createEmptyTranscriptState(
       requestCount: 0,
     },
     childIds: [],
+    childLabels: {},
     compactedCount: 0,
     lastCompactedTurn: null,
     lastCompactedStep: null,
@@ -131,13 +213,24 @@ function processLine(state: ParsedTranscriptState, line: string): boolean {
 
   if (type === 'GENERIC') {
     const content = typeof obj.content === 'string' ? obj.content : trimmed;
+    if (isLikelyNonChildDump(content)) {
+      return changed;
+    }
+    const labels = extractChildLabelsFromContent(content);
     CHILD_CONV_ID_REGEX.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = CHILD_CONV_ID_REGEX.exec(content)) !== null) {
       const childId = m[1];
-      if (childId && childId !== state.conversationId && !state.childIds.includes(childId)) {
-        state.childIds.push(childId);
-        changed = true;
+      if (childId && childId !== state.conversationId) {
+        if (!state.childIds.includes(childId)) {
+          state.childIds.push(childId);
+          changed = true;
+        }
+        const label = labels[childId];
+        if (label && state.childLabels[childId] !== label) {
+          state.childLabels[childId] = label;
+          changed = true;
+        }
       }
     }
     return changed;

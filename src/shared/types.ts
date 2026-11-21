@@ -28,6 +28,17 @@ export interface RootSessionSummary {
   subagentCount: number;
 }
 
+export interface SubsessionSummary {
+  id: string;
+  label: string;
+  model: string;
+  modelDisplayName: string;
+  totalTokens: number;
+  requestCount: number;
+  updatedAt: number;
+  parentId: string;
+}
+
 export interface ContextWindowStats {
   promptTokens: number;
   cacheReadTokens: number;
@@ -87,6 +98,9 @@ export interface MonitorStateFullResponse {
   timestamp: number;
   source: SessionSource;
   activeRootId: string | null;
+  activeScope: string;
+  activeScopeLabel: string;
+  subsessions: SubsessionSummary[];
   recentRoots: RootSessionSummary[];
   model: string;
   modelDisplayName: string;

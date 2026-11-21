@@ -125,8 +125,8 @@ describe('session-tree', () => {
       inputTokens: 5_000,
       lastOutputTokens: 300,
       estimatedNextTokens: 20_300,
-      limitTokens: 1_000_000,
-      usagePercent: 2,
+      limitTokens: 512_000,
+      usagePercent: 3.9,
     });
 
     // Totals MUST aggregate root (2 turns) + childA (1 turn) + grandChildB (1 turn)
@@ -234,5 +234,156 @@ describe('session-tree', () => {
       ]),
     ).toBe(false);
     expect(tree.getVersion()).toBe(v1);
+  });
+
+  it('builds scoped metrics for main, all, individual child, and falls back to main on invalid scope', () => {
+    const brainDir = makeBrainDir();
+    const rootId = '11111111-aaaa-1111-1111-111111111111';
+    const childWorkerId = '22222222-bbbb-2222-2222-222222222222';
+    const childTitledId = '33333333-cccc-3333-3333-333333333333';
+
+    writeTranscript(brainDir, rootId, [
+      {
+        step_index: 0,
+        type: 'USER_INPUT',
+        content: '<USER_REQUEST>\nMain Task\n</USER_REQUEST>',
+      },
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-20T00:00:01Z',
+        model: 'gemini-4-hydrogen-medium',
+        input_tokens: 10_000,
+        cache_read_tokens: 0,
+        output_tokens: 200,
+      },
+      {
+        step_index: 2,
+        type: 'GENERIC',
+        content: JSON.stringify({
+          status: 'added',
+          name: 'hook-worker',
+          conversation_id: childWorkerId,
+        }),
+      },
+      {
+        step_index: 3,
+        type: 'GENERIC',
+        content: JSON.stringify({ conversationId: childTitledId }),
+      },
+    ]);
+
+    writeTranscript(brainDir, childWorkerId, [
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-20T00:00:03Z',
+        model: 'claude-sonnet-4-20250514',
+        input_tokens: 2_000,
+        cache_read_tokens: 8_000,
+        output_tokens: 100,
+      },
+      {
+        step_index: 2,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-20T00:00:04Z',
+        model: 'claude-sonnet-4-20250514',
+        input_tokens: 1_000,
+        cache_read_tokens: 9_000,
+        output_tokens: 50,
+      },
+    ]);
+
+    writeTranscript(brainDir, childTitledId, [
+      {
+        step_index: 0,
+        type: 'USER_INPUT',
+        content: '<USER_REQUEST>\nVery Long Subagent Title Exceeding Twenty Four Characters\n</USER_REQUEST>',
+      },
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-20T00:00:06Z',
+        model: 'gemini-4-neon-high',
+        input_tokens: 500,
+        cache_read_tokens: 1_500,
+        output_tokens: 40,
+      },
+    ]);
+
+    const tree = new SessionTreeManager();
+    tree.sync(brainDir);
+
+    // 1. 'main' scope (default): strictly root totals & root contextWindow
+    const mainMetrics = tree.buildMetricsForScope(rootId, {});
+    expect(mainMetrics.activeScope).toBe('main');
+    expect(mainMetrics.activeScopeLabel).toBe('主会话');
+    expect(mainMetrics.subagentCount).toBe(2);
+    expect(mainMetrics.subsessions).toHaveLength(2);
+    expect(mainMetrics.subsessions[0]).toMatchObject({
+      id: childWorkerId,
+      label: 'hook-worker',
+      model: 'claude-sonnet-4-20250514',
+      totalTokens: 20_150,
+      requestCount: 2,
+      parentId: rootId,
+    });
+    expect(mainMetrics.subsessions[1]).toMatchObject({
+      id: childTitledId,
+      model: 'gemini-4-neon-high',
+      totalTokens: 2_040,
+      requestCount: 1,
+      parentId: rootId,
+    });
+    expect(mainMetrics.subsessions[1]!.label.length).toBeLessThanOrEqual(24);
+    expect(mainMetrics.subsessions[1]!.label.endsWith('…')).toBe(true);
+    expect(mainMetrics.totals).toMatchObject({
+      inputTokens: 10_000,
+      cacheReadTokens: 0,
+      outputTokens: 200,
+      totalTokens: 10_200,
+      requestCount: 1,
+    });
+
+    // 2. 'all' scope: aggregated totals across root + children, contextWindow from root
+    const allMetrics = tree.buildMetricsForScope(rootId, {}, undefined, 'all');
+    expect(allMetrics.activeScope).toBe('all');
+    expect(allMetrics.activeScopeLabel).toBe('总体');
+    expect(allMetrics.totals).toMatchObject({
+      inputTokens: 13_500,
+      cacheReadTokens: 18_500,
+      outputTokens: 390,
+      totalTokens: 32_390,
+      requestCount: 4,
+    });
+    expect(allMetrics.contextWindow?.promptTokens).toBe(10_000);
+    expect(allMetrics.contextWindow?.limitTokens).toBe(512_000);
+
+    // 3. Individual child scope: strictly child's totals, contextWindow, history, and model limit
+    const childMetrics = tree.buildMetricsForScope(rootId, {}, undefined, childWorkerId);
+    expect(childMetrics.activeScope).toBe(childWorkerId);
+    expect(childMetrics.activeScopeLabel).toBe('hook-worker');
+    expect(childMetrics.model).toBe('claude-sonnet-4-20250514');
+    expect(childMetrics.totals).toMatchObject({
+      inputTokens: 3_000,
+      cacheReadTokens: 17_000,
+      outputTokens: 150,
+      totalTokens: 20_150,
+      requestCount: 2,
+    });
+    expect(childMetrics.contextWindow).toMatchObject({
+      promptTokens: 10_000,
+      limitTokens: 200_000,
+      usagePercent: 5,
+    });
+    expect(childMetrics.history).toHaveLength(2);
+    expect(childMetrics.cache.latestTurnHitRate).toBe(90);
+    expect(childMetrics.cache.status).toBe('healthy');
+
+    // 4. Unknown/invalid child ID falls back to 'main'
+    const fallbackMetrics = tree.buildMetricsForScope(rootId, {}, undefined, 'non-existent-child');
+    expect(fallbackMetrics.activeScope).toBe('main');
+    expect(fallbackMetrics.activeScopeLabel).toBe('主会话');
+    expect(fallbackMetrics.totals.totalTokens).toBe(10_200);
   });
 });

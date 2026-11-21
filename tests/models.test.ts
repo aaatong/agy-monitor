@@ -26,11 +26,11 @@ afterEach(() => {
 describe('models', () => {
   it('resolves exact builtin, prefix/pattern fallback, and default limits', () => {
     expect(resolveModelLimit('gemini-4-hydrogen-medium')).toEqual({
-      limitTokens: 1_000_000,
+      limitTokens: 512_000,
       limitSource: 'builtin',
     });
     expect(resolveModelLimit('gemini-9-experimental')).toEqual({
-      limitTokens: 1_000_000,
+      limitTokens: 512_000,
       limitSource: 'builtin',
     });
     expect(resolveModelLimit('claude-sonnet-5')).toEqual({
@@ -47,17 +47,17 @@ describe('models', () => {
     const dir = makeTempDir();
     expect(loadUserModelLimits(dir)).toEqual({});
 
-    saveUserModelLimit(dir, 'Gemini-4-Hydrogen-Medium', 512_000);
+    saveUserModelLimit(dir, 'Gemini-4-Hydrogen-Medium', 768_000);
     saveUserModelLimit(dir, 'custom-model-x', 64_000);
 
     const reloaded = loadUserModelLimits(dir);
     expect(reloaded).toEqual({
-      'gemini-4-hydrogen-medium': 512_000,
+      'gemini-4-hydrogen-medium': 768_000,
       'custom-model-x': 64_000,
     });
 
     expect(resolveModelLimit('gemini-4-hydrogen-medium', reloaded)).toEqual({
-      limitTokens: 512_000,
+      limitTokens: 768_000,
       limitSource: 'custom',
     });
     expect(resolveModelLimit('custom-model-x', reloaded)).toEqual({

@@ -5,9 +5,9 @@ import { fileURLToPath } from "node:url";
 import { Response, SidecarApp } from "sidecar_sdk";
 
 // src/sidecar/state.ts
-import fs4 from "node:fs";
+import fs5 from "node:fs";
 import os from "node:os";
-import path4 from "node:path";
+import path5 from "node:path";
 
 // src/sidecar/models.ts
 import fs from "node:fs";
@@ -115,14 +115,46 @@ function saveUserModelLimit(pluginDataDir, model, limitTokens) {
   fs.renameSync(tmpPath, filePath);
   return current;
 }
-function resolveModelLimit(model, userLimits = {}) {
+function deleteUserModelLimit(pluginDataDir, model) {
+  const key = normalizeModelKey(model);
+  const current = loadUserModelLimits(pluginDataDir);
+  if (!key || !(key in current)) {
+    return current;
+  }
+  delete current[key];
+  const filePath = path.join(pluginDataDir, "user-models.json");
+  try {
+    fs.mkdirSync(pluginDataDir, { recursive: true });
+    const tmpPath = path.join(
+      pluginDataDir,
+      `.user-models.${process.pid}.${Date.now()}.tmp`
+    );
+    fs.writeFileSync(tmpPath, JSON.stringify(current, null, 2) + "\n", "utf8");
+    fs.renameSync(tmpPath, filePath);
+  } catch {
+  }
+  return current;
+}
+function resolveModelLimit(model, userLimits = {}, nativeLimitTokens) {
   const key = normalizeModelKey(model);
   if (!key) {
+    if (typeof nativeLimitTokens === "number" && Number.isFinite(nativeLimitTokens) && nativeLimitTokens > 0) {
+      return {
+        limitTokens: Math.round(nativeLimitTokens),
+        limitSource: "native"
+      };
+    }
     return { limitTokens: config.defaultLimit, limitSource: "default" };
   }
   const custom = userLimits[key];
   if (typeof custom === "number" && custom > 0) {
     return { limitTokens: custom, limitSource: "custom" };
+  }
+  if (typeof nativeLimitTokens === "number" && Number.isFinite(nativeLimitTokens) && nativeLimitTokens > 0) {
+    return {
+      limitTokens: Math.round(nativeLimitTokens),
+      limitSource: "native"
+    };
   }
   const exact = config.exact[key];
   if (typeof exact === "number" && exact > 0) {
@@ -137,8 +169,189 @@ function resolveModelLimit(model, userLimits = {}) {
 }
 
 // src/sidecar/session-tree.ts
+import fs4 from "node:fs";
+import path4 from "node:path";
+
+// src/sidecar/sqlite-metrics.ts
 import fs3 from "node:fs";
+import { createRequire } from "node:module";
 import path3 from "node:path";
+
+// src/sidecar/protobuf.ts
+function parseProto(buf) {
+  const out = /* @__PURE__ */ new Map();
+  if (!buf || buf.length === 0) return out;
+  let i = 0;
+  while (i < buf.length) {
+    let tag = 0;
+    let shift = 0;
+    while (i < buf.length) {
+      const b = buf[i++];
+      tag |= (b & 127) << shift;
+      if (!(b & 128)) break;
+      shift += 7;
+    }
+    const fn = tag >>> 3;
+    const wt = tag & 7;
+    if (fn <= 0 || fn > 1e4) break;
+    if (wt === 0) {
+      let val = 0;
+      let s = 0;
+      while (i < buf.length) {
+        const b = buf[i++];
+        val += (b & 127) * Math.pow(2, s);
+        if (!(b & 128)) break;
+        s += 7;
+      }
+      out.set(fn, val);
+    } else if (wt === 2) {
+      let len = 0;
+      let s = 0;
+      while (i < buf.length) {
+        const b = buf[i++];
+        len |= (b & 127) << s;
+        if (!(b & 128)) break;
+        s += 7;
+      }
+      if (len < 0 || i + len > buf.length) break;
+      out.set(fn, buf.subarray(i, i + len));
+      i += len;
+    } else if (wt === 1) {
+      if (i + 8 > buf.length) break;
+      out.set(fn, buf.subarray(i, i + 8));
+      i += 8;
+    } else if (wt === 5) {
+      if (i + 4 > buf.length) break;
+      out.set(fn, buf.subarray(i, i + 4));
+      i += 4;
+    } else {
+      break;
+    }
+  }
+  return out;
+}
+function getBytes(fields, fn) {
+  if (!fields) return null;
+  const v = fields.get(fn);
+  return v instanceof Uint8Array ? v : null;
+}
+function getSubMap(fields, fn) {
+  const bytes = getBytes(fields, fn);
+  return bytes ? parseProto(bytes) : null;
+}
+function getNum(fields, fn) {
+  if (!fields) return 0;
+  const v = fields.get(fn);
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+function getStr(fields, fn) {
+  const bytes = getBytes(fields, fn);
+  if (!bytes || bytes.length === 0) return "";
+  return Buffer.from(bytes).toString("utf8").trim();
+}
+function extractStepIdxs(raw) {
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) && raw >= 0 ? [raw] : [];
+  }
+  if (!(raw instanceof Uint8Array) || raw.length === 0) {
+    return [];
+  }
+  const out = [];
+  let i = 0;
+  while (i < raw.length) {
+    let val = 0;
+    let s = 0;
+    while (i < raw.length) {
+      const b = raw[i++];
+      val += (b & 127) * Math.pow(2, s);
+      if (!(b & 128)) break;
+      s += 7;
+    }
+    if (Number.isFinite(val) && val >= 0) {
+      out.push(val);
+    }
+  }
+  return out;
+}
+function parseGenMetadataRow(row) {
+  const top = parseProto(row.data);
+  const chat = getSubMap(top, 1);
+  const usage = getSubMap(chat, 4);
+  const chatStart = getSubMap(chat, 9);
+  const ctxMeta = getSubMap(chatStart, 10);
+  const ttftMap = getSubMap(chat, 11);
+  const streamMap = getSubMap(chat, 12);
+  const planner = getSubMap(top, 3);
+  const meta17 = getSubMap(chat, 17);
+  const inTok = getNum(usage, 2);
+  const outTok = getNum(usage, 3);
+  const cacheWrite = getNum(usage, 4);
+  const cacheRead = getNum(usage, 5);
+  const maxCtx = getNum(ctxMeta, 4);
+  const stepIdxs = extractStepIdxs(top.get(2));
+  const maxStepIdx = stepIdxs.length > 0 ? Math.max(...stepIdxs) : -1;
+  const thinkTok = getNum(usage, 9);
+  const respTok = getNum(usage, 10);
+  const ttft = getNum(ttftMap, 1) + getNum(ttftMap, 2) / 1e9;
+  const stream = getNum(streamMap, 1) + getNum(streamMap, 2) / 1e9;
+  const modelName = getStr(chat, 21) || getStr(chat, 19) || getStr(planner, 28);
+  const errCode = getNum(meta17, 5);
+  const errMsg = getStr(meta17, 3);
+  return {
+    idx: row.idx,
+    inTok,
+    outTok,
+    cacheWrite,
+    cacheRead,
+    ctx: inTok + cacheWrite + cacheRead,
+    maxCtx,
+    stepIdxs,
+    maxStepIdx,
+    modelName,
+    thinkTok,
+    respTok,
+    ttft,
+    stream,
+    totDur: ttft + stream,
+    errCode,
+    errMsg
+  };
+}
+function parseCheckpointStepInfo(row) {
+  let cpMetaIdx = -1;
+  if (row.metadata && row.metadata.length > 0) {
+    const meta = parseProto(row.metadata);
+    const stepInfo = getSubMap(meta, 20);
+    const rawMIdx = stepInfo?.get(3);
+    if (typeof rawMIdx === "number" && Number.isFinite(rawMIdx)) {
+      cpMetaIdx = rawMIdx;
+    }
+  }
+  let summaryBytes = 0;
+  if (row.step_payload && row.step_payload.length > 0) {
+    const top = parseProto(row.step_payload);
+    const cpBody = getSubMap(top, 30);
+    const summaryBuf = getBytes(cpBody, 5);
+    if (summaryBuf) {
+      summaryBytes = summaryBuf.length;
+    }
+  }
+  return {
+    idx: row.idx,
+    status: row.status,
+    cpMetaIdx,
+    summaryBytes
+  };
+}
+function extractStepStartMs(metaBuf) {
+  if (!metaBuf || metaBuf.length === 0) return 0;
+  const meta = parseProto(metaBuf);
+  const ts = getSubMap(meta, 1);
+  if (!ts) return 0;
+  const sec = getNum(ts, 1);
+  const nanos = getNum(ts, 2);
+  return sec > 0 ? sec * 1e3 + Math.floor(nanos / 1e6) : 0;
+}
 
 // src/sidecar/transcript-parser.ts
 import fs2 from "node:fs";
@@ -413,6 +626,306 @@ function syncTranscriptState(state) {
   return stateChanged;
 }
 
+// src/sidecar/sqlite-metrics.ts
+var cachedDatabaseSyncCtor;
+function loadBuiltinDatabaseSync() {
+  if (cachedDatabaseSyncCtor !== void 0) {
+    return cachedDatabaseSyncCtor;
+  }
+  try {
+    const req = createRequire(import.meta.url);
+    const mod = req("node:sqlite");
+    if (mod && typeof mod.DatabaseSync === "function") {
+      cachedDatabaseSyncCtor = mod.DatabaseSync;
+      return cachedDatabaseSyncCtor;
+    }
+  } catch {
+  }
+  cachedDatabaseSyncCtor = null;
+  return null;
+}
+var VALID_CONV_ID_RE = /^[0-9a-f-]{8,64}$/i;
+var MIN_STREAM_DUR_SEC = 0.12;
+var MAX_SANITY_STREAM_TPS = 3e3;
+var MAX_CACHE_ENTRIES = 30;
+function getDbSignature(conversationId, conversationsDir) {
+  if (!conversationId || !VALID_CONV_ID_RE.test(conversationId)) {
+    return null;
+  }
+  try {
+    const dbPath = path3.join(conversationsDir, `${conversationId}.db`);
+    const st = fs3.statSync(dbPath, { throwIfNoEntry: false });
+    if (!st || !st.isFile()) return null;
+    const wst = fs3.statSync(`${dbPath}-wal`, { throwIfNoEntry: false });
+    const walSig = wst ? `${wst.mtimeMs}:${wst.size}` : "0:0";
+    return `${st.mtimeMs}:${st.size}|${walSig}`;
+  } catch {
+    return null;
+  }
+}
+function computeSpeedStats(outTok, ttft, stream) {
+  const safeOut = outTok > 0 ? outTok : 0;
+  const safeTtft = ttft > 0 ? ttft : 0;
+  const safeStream = stream > 0 ? stream : 0;
+  const streamTps = safeStream >= MIN_STREAM_DUR_SEC ? safeOut / safeStream : 0;
+  const totDur = safeTtft + safeStream;
+  const e2eTps = totDur > 0 ? safeOut / totDur : 0;
+  const streamValid = streamTps > 0 && streamTps <= MAX_SANITY_STREAM_TPS;
+  const displayTps = Math.round(streamValid ? streamTps : e2eTps);
+  return {
+    streamTps: round1(streamTps),
+    e2eTps: round1(e2eTps),
+    displayTps,
+    usedE2eFallback: !streamValid
+  };
+}
+var SqliteMetricsStore = class {
+  cache = /* @__PURE__ */ new Map();
+  getDatabaseSync;
+  constructor(databaseSyncCtor) {
+    this.getDatabaseSync = databaseSyncCtor !== void 0 ? () => databaseSyncCtor : loadBuiltinDatabaseSync;
+  }
+  setCache(dbPath, entry) {
+    if (this.cache.has(dbPath)) {
+      this.cache.delete(dbPath);
+    }
+    this.cache.set(dbPath, entry);
+    if (this.cache.size > MAX_CACHE_ENTRIES) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest) {
+        this.cache.delete(oldest);
+      }
+    }
+  }
+  sync(conversationId, conversationsDir) {
+    const DatabaseSync = this.getDatabaseSync();
+    if (!DatabaseSync) {
+      return { changed: false, metrics: null };
+    }
+    const dbPath = path3.join(conversationsDir, `${conversationId}.db`);
+    const rawSig = getDbSignature(conversationId, conversationsDir);
+    const prev = this.cache.get(dbPath);
+    if (!rawSig) {
+      if (prev) {
+        this.cache.delete(dbPath);
+        return { changed: true, metrics: null };
+      }
+      return { changed: false, metrics: null };
+    }
+    if (prev && prev.sig === rawSig) {
+      return { changed: false, metrics: prev.metrics };
+    }
+    let db = null;
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true, timeout: 200 });
+      const metaStat = db.prepare("SELECT COUNT(*) AS cnt, COALESCE(MAX(idx), -1) AS maxIdx FROM gen_metadata").get();
+      const rowCount = Number(metaStat?.cnt ?? 0);
+      const maxIdx = Number(metaStat?.maxIdx ?? -1);
+      const stepStat = db.prepare("SELECT COUNT(*) AS cnt, COALESCE(MAX(idx), -1) AS maxIdx FROM steps").get();
+      const totalStepsCount = Number(stepStat?.cnt ?? 0);
+      const maxStepIdxAll = Number(stepStat?.maxIdx ?? -1);
+      const cpRows = db.prepare(
+        "SELECT idx, status, metadata, step_payload FROM steps WHERE step_type = 23 AND status = 3 ORDER BY idx ASC"
+      ).all();
+      const activeSteps = db.prepare(
+        "SELECT idx, step_type, status, metadata FROM steps WHERE status IN (1, 2, 8, 9, 11) ORDER BY idx DESC LIMIT 10"
+      ).all();
+      const lastGenMetaRow = maxIdx >= 0 ? db.prepare("SELECT size, length(data) AS dlen FROM gen_metadata WHERE idx = ?").get(maxIdx) : void 0;
+      const lastGenSig = lastGenMetaRow ? `${maxIdx}:${lastGenMetaRow.size ?? 0}:${lastGenMetaRow.dlen ?? 0}` : "";
+      let items = [];
+      let validItems = [];
+      let totalIn = 0;
+      let totalCacheWrite = 0;
+      let totalCacheRead = 0;
+      let totalOut = 0;
+      let totalThink = 0;
+      let totalResp = 0;
+      const canIncremental = prev && rowCount > 0 && maxIdx >= 0 && rowCount >= prev.rowCount && maxIdx >= prev.maxIdx && totalStepsCount >= prev.totalStepsCount && maxStepIdxAll >= prev.maxStepIdxAll && (rowCount > prev.rowCount || maxIdx > prev.maxIdx || lastGenSig === prev.lastGenSig);
+      if (canIncremental && prev) {
+        items = [...prev.items];
+        validItems = [...prev.validItems];
+        totalIn = prev.totalIn;
+        totalCacheWrite = prev.totalCacheWrite;
+        totalCacheRead = prev.totalCacheRead;
+        totalOut = prev.totalOut;
+        totalThink = prev.totalThink;
+        totalResp = prev.totalResp;
+        const startIdx = prev.maxIdx;
+        const deltaRows = startIdx >= 0 ? db.prepare("SELECT idx, data FROM gen_metadata WHERE idx >= ? ORDER BY idx ASC").all(startIdx) : [];
+        while (items.length > 0 && items[items.length - 1].idx >= startIdx) {
+          const popped = items.pop();
+          totalIn -= popped.inTok;
+          totalCacheWrite -= popped.cacheWrite;
+          totalCacheRead -= popped.cacheRead;
+          totalOut -= popped.outTok;
+          totalThink -= popped.thinkTok;
+          totalResp -= popped.respTok;
+        }
+        while (validItems.length > 0 && validItems[validItems.length - 1].idx >= startIdx) {
+          validItems.pop();
+        }
+        if (items.length + deltaRows.length === rowCount) {
+          for (const row of deltaRows) {
+            const p = parseGenMetadataRow(row);
+            items.push(p);
+            totalIn += p.inTok;
+            totalCacheWrite += p.cacheWrite;
+            totalCacheRead += p.cacheRead;
+            totalOut += p.outTok;
+            totalThink += p.thinkTok;
+            totalResp += p.respTok;
+            if (p.ctx > 0 || p.outTok > 0) {
+              validItems.push(p);
+            }
+          }
+        } else {
+          items = [];
+          validItems = [];
+        }
+      }
+      if (items.length === 0 && rowCount > 0 && maxIdx >= 0) {
+        const rows = db.prepare("SELECT idx, data FROM gen_metadata ORDER BY idx ASC").all();
+        totalIn = 0;
+        totalCacheWrite = 0;
+        totalCacheRead = 0;
+        totalOut = 0;
+        totalThink = 0;
+        totalResp = 0;
+        for (const row of rows) {
+          const p = parseGenMetadataRow(row);
+          items.push(p);
+          totalIn += p.inTok;
+          totalCacheWrite += p.cacheWrite;
+          totalCacheRead += p.cacheRead;
+          totalOut += p.outTok;
+          totalThink += p.thinkTok;
+          totalResp += p.respTok;
+          if (p.ctx > 0 || p.outTok > 0) {
+            validItems.push(p);
+          }
+        }
+      }
+      db.close();
+      db = null;
+      let nativeContextLimit = 0;
+      for (let i = validItems.length - 1; i >= 0; i--) {
+        if (validItems[i].maxCtx > 0) {
+          nativeContextLimit = validItems[i].maxCtx;
+          break;
+        }
+      }
+      if (!nativeContextLimit) {
+        for (let i = items.length - 1; i >= 0; i--) {
+          if (items[i].maxCtx > 0) {
+            nativeContextLimit = items[i].maxCtx;
+            break;
+          }
+        }
+      }
+      const lastValid = validItems.length > 0 ? validItems[validItems.length - 1] : null;
+      let latestPerformance = null;
+      if (lastValid) {
+        const lastSpeed = computeSpeedStats(
+          lastValid.outTok,
+          lastValid.ttft,
+          lastValid.stream
+        );
+        let streamTpsSum = 0;
+        let streamTpsCount = 0;
+        let ttftSum = 0;
+        let ttftCount = 0;
+        for (const v of validItems) {
+          const s = computeSpeedStats(v.outTok, v.ttft, v.stream);
+          if (s.displayTps > 0) {
+            streamTpsSum += s.displayTps;
+            streamTpsCount += 1;
+          }
+          if (v.ttft > 0) {
+            ttftSum += v.ttft;
+            ttftCount += 1;
+          }
+        }
+        latestPerformance = {
+          stepIndex: lastValid.maxStepIdx >= 0 ? lastValid.maxStepIdx : lastValid.idx,
+          streamTps: lastSpeed.streamTps,
+          e2eTps: lastSpeed.e2eTps,
+          displayTps: lastSpeed.displayTps,
+          usedE2eFallback: lastSpeed.usedE2eFallback,
+          ttftSec: Number(lastValid.ttft.toFixed(2)),
+          streamSec: Number(lastValid.stream.toFixed(2)),
+          totalSec: Number(lastValid.totDur.toFixed(2)),
+          avgStreamTps: streamTpsCount > 0 ? Math.round(streamTpsSum / streamTpsCount) : 0,
+          avgTtftSec: ttftCount > 0 ? Number((ttftSum / ttftCount).toFixed(2)) : 0
+        };
+      }
+      const checkpointIdxs = cpRows.map((r) => r.idx);
+      const lastCheckpoint = cpRows.length > 0 ? parseCheckpointStepInfo(cpRows[cpRows.length - 1]) : null;
+      const activeCompactRow = activeSteps.find((r) => r.step_type === 23) ?? null;
+      const compactingNow = Boolean(activeCompactRow);
+      const compactedPending = Boolean(
+        lastCheckpoint && lastValid && (lastValid.maxStepIdx >= 0 ? lastCheckpoint.idx > lastValid.maxStepIdx : lastCheckpoint.cpMetaIdx > lastValid.idx)
+      );
+      const compactSummaryKb = compactedPending && lastCheckpoint && lastCheckpoint.summaryBytes > 0 ? Number((lastCheckpoint.summaryBytes / 1024).toFixed(1)) : 0;
+      const nonUserActive = activeSteps.filter(
+        (r) => r.step_type !== 14 && (!lastValid || lastValid.maxStepIdx < 0 || r.idx > lastValid.maxStepIdx)
+      );
+      const latestActive = activeCompactRow || nonUserActive[0] || null;
+      const liveState = !latestActive ? "idle" : latestActive.step_type === 23 ? "compacting" : latestActive.step_type === 15 ? "thinking" : "tool";
+      const metrics = {
+        conversationId,
+        sig: rawSig,
+        validItems,
+        totals: {
+          inTok: totalIn,
+          cacheWrite: totalCacheWrite,
+          cacheRead: totalCacheRead,
+          outTok: totalOut,
+          thinkTok: totalThink,
+          respTok: totalResp
+        },
+        nativeContextLimit,
+        latestPerformance,
+        compaction: {
+          checkpointIdxs,
+          compactingNow,
+          compactedPending,
+          compactSummaryKb
+        },
+        liveStatus: {
+          state: liveState,
+          pendingStepIdx: latestActive ? latestActive.idx : -1,
+          pendingStartedAtMs: latestActive ? extractStepStartMs(latestActive.metadata) : 0
+        }
+      };
+      this.setCache(dbPath, {
+        sig: rawSig,
+        rowCount,
+        maxIdx,
+        totalStepsCount,
+        maxStepIdxAll,
+        lastGenSig,
+        items,
+        validItems,
+        totalIn,
+        totalCacheWrite,
+        totalCacheRead,
+        totalOut,
+        totalThink,
+        totalResp,
+        metrics
+      });
+      return { changed: true, metrics };
+    } catch {
+      return { changed: false, metrics: prev?.metrics ?? null };
+    } finally {
+      try {
+        db?.close();
+      } catch {
+      }
+    }
+  }
+};
+
 // src/sidecar/session-tree.ts
 var MAX_RECENT_ROOTS = 20;
 var MAX_BRAIN_SCAN_DIRS = 50;
@@ -422,35 +935,111 @@ function truncateLabel(text, maxLen = SUBSESSION_LABEL_MAX_LEN) {
   if (cleaned.length <= maxLen) return cleaned;
   return `${cleaned.slice(0, maxLen - 1).trimEnd()}\u2026`;
 }
-function buildTotalsFromStates(states) {
+function buildTotalsFromStates(convIds, transcripts, sqliteMetrics) {
   let inputTokens = 0;
   let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
   let outputTokens = 0;
+  let thinkingTokens = 0;
+  let responseTokens = 0;
+  let hasThinkingSplit = false;
   let requestCount = 0;
-  for (const state of states) {
-    if (!state) continue;
-    inputTokens += state.totals.inputTokens;
-    cacheReadTokens += state.totals.cacheReadTokens;
-    outputTokens += state.totals.outputTokens;
-    requestCount += state.totals.requestCount;
+  for (const id of convIds) {
+    const state = transcripts.get(id);
+    if (state) {
+      inputTokens += state.totals.inputTokens;
+      cacheReadTokens += state.totals.cacheReadTokens;
+      outputTokens += state.totals.outputTokens;
+      requestCount += state.totals.requestCount;
+    }
+    const sql = sqliteMetrics.get(id);
+    if (sql && sql.validItems.length > 0) {
+      cacheWriteTokens += sql.totals.cacheWrite;
+      thinkingTokens += sql.totals.thinkTok;
+      responseTokens += sql.totals.respTok;
+      if (sql.totals.thinkTok > 0 || sql.totals.respTok > 0) {
+        hasThinkingSplit = true;
+      }
+    }
   }
-  const totalInputTokens = inputTokens + cacheReadTokens;
+  const totalInputTokens = inputTokens + cacheWriteTokens + cacheReadTokens;
   const totalTokens = totalInputTokens + outputTokens;
   return {
     inputTokens,
     cacheReadTokens,
+    cacheWriteTokens,
     totalInputTokens,
     outputTokens,
+    ...hasThinkingSplit ? { thinkingTokens, responseTokens } : {},
     totalTokens,
     requestCount
   };
 }
+function enrichTurnsWithSqlite(turns, sql) {
+  if (!sql || sql.validItems.length === 0) {
+    return turns;
+  }
+  const items = sql.validItems;
+  const used = /* @__PURE__ */ new Set();
+  const matchedItems = turns.map((t, idx) => {
+    const byStep = items.findIndex(
+      (g, gi) => !used.has(gi) && g.stepIdxs.includes(t.stepIndex)
+    );
+    if (byStep !== -1) {
+      used.add(byStep);
+      return items[byStep];
+    }
+    const byTokens = items.findIndex(
+      (g, gi) => !used.has(gi) && g.inTok === t.inputTokens && g.outTok === t.outputTokens
+    );
+    if (byTokens !== -1) {
+      used.add(byTokens);
+      return items[byTokens];
+    }
+    if (turns.length === items.length && !used.has(idx)) {
+      used.add(idx);
+      return items[idx];
+    }
+    return null;
+  });
+  const cpIdxs = sql.compaction.checkpointIdxs;
+  return turns.map((t, idx) => {
+    const g = matchedItems[idx];
+    const prevStepIdx = idx > 0 ? turns[idx - 1].stepIndex : -1;
+    const compacted = cpIdxs.length > 0 ? cpIdxs.some((cpIdx) => prevStepIdx < cpIdx && cpIdx < t.stepIndex) : t.compacted;
+    if (!g) {
+      return compacted !== t.compacted ? { ...t, compacted } : t;
+    }
+    const promptTokens = g.inTok + g.cacheWrite + g.cacheRead;
+    const hitRate = promptTokens > 0 ? round1(g.cacheRead / promptTokens * 100) : 0;
+    const speed = computeSpeedStats(g.outTok, g.ttft, g.stream);
+    return {
+      ...t,
+      promptTokens,
+      cacheReadTokens: g.cacheRead,
+      cacheWriteTokens: g.cacheWrite,
+      thinkingTokens: g.thinkTok,
+      responseTokens: g.respTok,
+      ttftSec: Number(g.ttft.toFixed(2)),
+      streamSec: Number(g.stream.toFixed(2)),
+      totalSec: Number(g.totDur.toFixed(2)),
+      tps: speed.displayTps,
+      hitRate,
+      compacted
+    };
+  });
+}
 var SessionTreeManager = class {
   transcripts = /* @__PURE__ */ new Map();
+  sqliteMetrics = /* @__PURE__ */ new Map();
+  sqliteStore;
   parentToChildren = /* @__PURE__ */ new Map();
   childToParent = /* @__PURE__ */ new Map();
   childToRoot = /* @__PURE__ */ new Map();
   version = 1;
+  constructor(databaseSyncCtor) {
+    this.sqliteStore = new SqliteMetricsStore(databaseSyncCtor);
+  }
   getVersion() {
     return this.version;
   }
@@ -465,8 +1054,9 @@ var SessionTreeManager = class {
    * Discovers and incrementally syncs transcripts under `brainDir` plus any explicit
    * transcript paths from `active-session.json`.
    */
-  sync(brainDir, extraRecords = []) {
+  sync(brainDir, extraRecords = [], conversationsDir) {
     let anyChanged = false;
+    const resolvedConvDir = conversationsDir ?? path4.join(path4.dirname(brainDir), "conversations");
     const queue = /* @__PURE__ */ new Map();
     for (const rec of extraRecords) {
       if (rec.conversationId && rec.transcriptPath && !queue.has(rec.conversationId)) {
@@ -474,11 +1064,11 @@ var SessionTreeManager = class {
       }
     }
     try {
-      const entries = fs3.readdirSync(brainDir, { withFileTypes: true });
+      const entries = fs4.readdirSync(brainDir, { withFileTypes: true });
       const candidates = [];
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
-        const transcriptPath = path3.join(
+        const transcriptPath = path4.join(
           brainDir,
           entry.name,
           ".system_generated",
@@ -486,7 +1076,7 @@ var SessionTreeManager = class {
           "transcript.jsonl"
         );
         try {
-          const stat = fs3.statSync(transcriptPath);
+          const stat = fs4.statSync(transcriptPath);
           if (stat.isFile()) {
             candidates.push({
               id: entry.name,
@@ -511,7 +1101,7 @@ var SessionTreeManager = class {
       const convId = pendingIds.shift();
       if (processed.has(convId)) continue;
       processed.add(convId);
-      const transcriptPath = queue.get(convId) ?? path3.join(brainDir, convId, ".system_generated", "logs", "transcript.jsonl");
+      const transcriptPath = queue.get(convId) ?? path4.join(brainDir, convId, ".system_generated", "logs", "transcript.jsonl");
       let state = this.transcripts.get(convId);
       if (!state) {
         state = createEmptyTranscriptState(convId, transcriptPath);
@@ -522,7 +1112,7 @@ var SessionTreeManager = class {
       }
       let needsSync = false;
       try {
-        const stat = fs3.statSync(state.transcriptPath);
+        const stat = fs4.statSync(state.transcriptPath);
         if (stat.mtimeMs !== state.mtimeMs || stat.size !== state.fileSize || state.lastError) {
           needsSync = true;
         }
@@ -532,12 +1122,17 @@ var SessionTreeManager = class {
       if (needsSync && syncTranscriptState(state)) {
         anyChanged = true;
       }
+      const sqlRes = this.sqliteStore.sync(convId, resolvedConvDir);
+      this.sqliteMetrics.set(convId, sqlRes.metrics);
+      if (sqlRes.changed) {
+        anyChanged = true;
+      }
       for (const childId of state.childIds) {
         if (!processed.has(childId)) {
           if (!queue.has(childId)) {
             queue.set(
               childId,
-              path3.join(brainDir, childId, ".system_generated", "logs", "transcript.jsonl")
+              path4.join(brainDir, childId, ".system_generated", "logs", "transcript.jsonl")
             );
           }
           pendingIds.push(childId);
@@ -712,7 +1307,11 @@ var SessionTreeManager = class {
       const parentLabel = this.transcripts.get(parentId)?.childLabels[id];
       const label = parentLabel || (childState?.title ? truncateLabel(childState.title) : `#${id.slice(0, 6)}`);
       const model = childState?.latestModel || "unknown";
-      const totals = buildTotalsFromStates([childState]);
+      const totals = buildTotalsFromStates(
+        [id],
+        this.transcripts,
+        this.sqliteMetrics
+      );
       return {
         id,
         label,
@@ -731,34 +1330,57 @@ var SessionTreeManager = class {
     const descendants = subsessions.map((s) => s.id);
     const effectiveScope = this.resolveEffectiveScope(rootId, scope);
     const isChildScope = effectiveScope !== "main" && effectiveScope !== "all";
-    const targetState = isChildScope ? this.transcripts.get(effectiveScope) : rootState;
+    const targetId = isChildScope ? effectiveScope : rootId;
+    const targetState = this.transcripts.get(targetId);
+    const targetSql = this.sqliteMetrics.get(targetId) ?? null;
     const model = isChildScope ? targetState?.latestModel || "unknown" : rootState?.latestModel || fallbackModel || "unknown";
     const modelDisplayName = formatModelDisplayName(model);
-    const totals = effectiveScope === "all" ? buildTotalsFromStates([
-      rootState,
-      ...descendants.map((id) => this.transcripts.get(id))
-    ]) : buildTotalsFromStates([targetState]);
+    const totals = effectiveScope === "all" ? buildTotalsFromStates(
+      [rootId, ...descendants],
+      this.transcripts,
+      this.sqliteMetrics
+    ) : buildTotalsFromStates([targetId], this.transcripts, this.sqliteMetrics);
     const activeScopeLabel = effectiveScope === "all" ? "\u603B\u4F53" : effectiveScope === "main" ? "\u4E3B\u4F1A\u8BDD" : subsessions.find((s) => s.id === effectiveScope)?.label ?? `#${effectiveScope.slice(0, 6)}`;
-    const turns = targetState?.turns ?? [];
+    const rawTurns = targetState?.turns ?? [];
+    const turns = enrichTurnsWithSqlite(rawTurns, targetSql);
     const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+    const lastSqlValid = targetSql && targetSql.validItems.length > 0 ? targetSql.validItems[targetSql.validItems.length - 1] : null;
     let contextWindow = null;
     if (lastTurn) {
-      const { limitTokens, limitSource } = resolveModelLimit(model, userLimits);
+      const nativeLimitTokens = targetSql && targetSql.nativeContextLimit > 0 ? targetSql.nativeContextLimit : void 0;
+      const { limitTokens, limitSource } = resolveModelLimit(
+        model,
+        userLimits,
+        nativeLimitTokens
+      );
+      const cacheWriteTokens = lastTurn.cacheWriteTokens ?? 0;
       const estimatedNextTokens = lastTurn.promptTokens + lastTurn.outputTokens;
+      const compactedCount = targetSql && targetSql.compaction.checkpointIdxs.length > 0 ? targetSql.compaction.checkpointIdxs.length : targetState?.compactedCount ?? 0;
       contextWindow = {
         promptTokens: lastTurn.promptTokens,
         cacheReadTokens: lastTurn.cacheReadTokens,
+        cacheWriteTokens,
         inputTokens: lastTurn.inputTokens,
         lastOutputTokens: lastTurn.outputTokens,
+        ...lastSqlValid && (lastSqlValid.thinkTok > 0 || lastSqlValid.respTok > 0) ? {
+          lastThinkingTokens: lastSqlValid.thinkTok,
+          lastResponseTokens: lastSqlValid.respTok
+        } : {},
         estimatedNextTokens,
         limitTokens,
+        ...nativeLimitTokens ? { nativeLimitTokens } : {},
         limitSource,
         usagePercent: limitTokens > 0 ? round1(lastTurn.promptTokens / limitTokens * 100) : 0,
         estimatedNextPercent: limitTokens > 0 ? round1(estimatedNextTokens / limitTokens * 100) : 0,
-        compactedCount: targetState?.compactedCount ?? 0,
+        compactedCount,
         lastCompactedTurn: targetState?.lastCompactedTurn ?? null,
         lastCompactedStep: targetState?.lastCompactedStep ?? null,
-        previousPromptBeforeCompact: targetState?.previousPromptBeforeCompact ?? null
+        previousPromptBeforeCompact: targetState?.previousPromptBeforeCompact ?? null,
+        ...targetSql ? {
+          compactingNow: targetSql.compaction.compactingNow,
+          compactedPending: targetSql.compaction.compactedPending,
+          compactSummaryKb: targetSql.compaction.compactSummaryKb
+        } : {}
       };
     }
     const overallHitRate = totals.totalInputTokens > 0 ? round1(totals.cacheReadTokens / totals.totalInputTokens * 100) : 0;
@@ -795,6 +1417,9 @@ var SessionTreeManager = class {
         note
       },
       history: turns,
+      sqliteEnabled: Boolean(targetSql),
+      performance: targetSql?.latestPerformance ?? null,
+      liveStatus: targetSql?.liveStatus ?? null,
       transcriptError: targetState?.lastError
     };
   }
@@ -826,32 +1451,32 @@ var SessionTreeManager = class {
 function resolveAppDataDir() {
   const execDataDir = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR?.trim();
   if (execDataDir) {
-    let cur = path4.resolve(execDataDir);
+    let cur = path5.resolve(execDataDir);
     for (let i = 0; i < 6; i++) {
-      const parent = path4.dirname(cur);
-      if (path4.basename(cur) === "sidecar_data" && parent && parent !== cur) {
+      const parent = path5.dirname(cur);
+      if (path5.basename(cur) === "sidecar_data" && parent && parent !== cur) {
         return parent;
       }
       if (parent === cur) break;
       cur = parent;
     }
   }
-  return path4.join(os.homedir(), ".gemini", "antigravity");
+  return path5.join(os.homedir(), ".gemini", "antigravity");
 }
 function getCandidatePluginDataDirs(appDataDir) {
   const candidates = [];
   const add = (dir) => {
     const trimmed = dir?.trim();
     if (!trimmed) return;
-    const resolved = path4.resolve(trimmed);
+    const resolved = path5.resolve(trimmed);
     if (!candidates.includes(resolved)) {
       candidates.push(resolved);
     }
   };
   add(process.env.PLUGIN_DATA);
-  add(path4.join(appDataDir, "plugin_data", "agy-monitor"));
-  add(path4.join(os.homedir(), ".gemini", "antigravity", "plugin_data", "agy-monitor"));
-  add(path4.join(os.homedir(), ".gemini", "config", "plugin-data", "agy-monitor"));
+  add(path5.join(appDataDir, "plugin_data", "agy-monitor"));
+  add(path5.join(os.homedir(), ".gemini", "antigravity", "plugin_data", "agy-monitor"));
+  add(path5.join(os.homedir(), ".gemini", "config", "plugin-data", "agy-monitor"));
   return candidates;
 }
 function resolvePluginDataAndSessionFile() {
@@ -859,10 +1484,10 @@ function resolvePluginDataAndSessionFile() {
   const explicitPluginData = process.env.PLUGIN_DATA?.trim();
   const candidates = getCandidatePluginDataDirs(appDataDir);
   if (explicitPluginData) {
-    const explicitDir = path4.resolve(explicitPluginData);
-    const explicitFile = path4.join(explicitDir, "active-session.json");
+    const explicitDir = path5.resolve(explicitPluginData);
+    const explicitFile = path5.join(explicitDir, "active-session.json");
     try {
-      if (fs4.statSync(explicitFile).isFile()) {
+      if (fs5.statSync(explicitFile).isFile()) {
         return {
           appDataDir,
           pluginDataDir: explicitDir,
@@ -875,9 +1500,9 @@ function resolvePluginDataAndSessionFile() {
   }
   let bestMatch = null;
   for (const dir of candidates) {
-    const filePath = path4.join(dir, "active-session.json");
+    const filePath = path5.join(dir, "active-session.json");
     try {
-      const stat = fs4.statSync(filePath);
+      const stat = fs5.statSync(filePath);
       if (!stat.isFile()) continue;
       if (!bestMatch || stat.mtimeMs > bestMatch.mtimeMs) {
         bestMatch = {
@@ -897,16 +1522,16 @@ function resolvePluginDataAndSessionFile() {
       exists: true
     };
   }
-  const primaryDir = candidates[0] ?? path4.join(appDataDir, "plugin_data", "agy-monitor");
+  const primaryDir = candidates[0] ?? path5.join(appDataDir, "plugin_data", "agy-monitor");
   return {
     appDataDir,
     pluginDataDir: primaryDir,
-    activeSessionFile: path4.join(primaryDir, "active-session.json"),
+    activeSessionFile: path5.join(primaryDir, "active-session.json"),
     exists: false
   };
 }
 function transcriptPathForConversation(appDataDir, conversationId) {
-  return path4.join(appDataDir, "brain", conversationId, ".system_generated", "logs", "transcript.jsonl");
+  return path5.join(appDataDir, "brain", conversationId, ".system_generated", "logs", "transcript.jsonl");
 }
 function normalizeSessionRecord(raw, appDataDir) {
   if (!raw || typeof raw !== "object") return null;
@@ -915,7 +1540,7 @@ function normalizeSessionRecord(raw, appDataDir) {
   const transcriptPath = typeof obj.transcriptPath === "string" ? obj.transcriptPath.trim() : "";
   if (!conversationId && !transcriptPath) return null;
   const workspacePaths = Array.isArray(obj.workspacePaths) ? obj.workspacePaths.filter((p) => typeof p === "string") : void 0;
-  const resolvedConvId = conversationId || path4.basename(path4.dirname(path4.dirname(path4.dirname(transcriptPath))));
+  const resolvedConvId = conversationId || path5.basename(path5.dirname(path5.dirname(path5.dirname(transcriptPath))));
   return {
     conversationId: resolvedConvId,
     transcriptPath: normalizeTranscriptPath(
@@ -930,8 +1555,8 @@ function normalizeSessionRecord(raw, appDataDir) {
 }
 function readActiveSessionFile(filePath, appDataDir) {
   try {
-    if (!fs4.existsSync(filePath)) return null;
-    const rawText = fs4.readFileSync(filePath, "utf8");
+    if (!fs5.existsSync(filePath)) return null;
+    const rawText = fs5.readFileSync(filePath, "utf8");
     const parsed = JSON.parse(rawText);
     const active = normalizeSessionRecord(parsed.active, appDataDir);
     const recentRaw = Array.isArray(parsed.recent) ? parsed.recent : [];
@@ -944,14 +1569,14 @@ function readActiveSessionFile(filePath, appDataDir) {
 function inferBrainDir(appDataDir, records) {
   for (const rec of records) {
     if (!rec.transcriptPath) continue;
-    const normalized = path4.resolve(rec.transcriptPath);
-    const parts = normalized.split(path4.sep);
+    const normalized = path5.resolve(rec.transcriptPath);
+    const parts = normalized.split(path5.sep);
     const brainIdx = parts.lastIndexOf("brain");
     if (brainIdx > 0 && brainIdx < parts.length - 1) {
-      return parts.slice(0, brainIdx + 1).join(path4.sep);
+      return parts.slice(0, brainIdx + 1).join(path5.sep);
     }
   }
-  return path4.join(appDataDir, "brain");
+  return path5.join(appDataDir, "brain");
 }
 var MonitorStateService = class {
   constructor(startedAtMs = Date.now()) {
@@ -975,7 +1600,7 @@ var MonitorStateService = class {
     let hookMtimeMs = 0;
     if (exists) {
       try {
-        hookMtimeMs = fs4.statSync(activeSessionFile).mtimeMs;
+        hookMtimeMs = fs5.statSync(activeSessionFile).mtimeMs;
       } catch {
         hookMtimeMs = 0;
       }
@@ -1013,7 +1638,8 @@ var MonitorStateService = class {
         updatedAt: Date.now()
       });
     }
-    this.tree.sync(brainDir, extraRecords);
+    const conversationsDir = path5.join(path5.dirname(brainDir), "conversations");
+    this.tree.sync(brainDir, extraRecords, conversationsDir);
     let source = "none";
     let activeRootId = null;
     let fallbackModel;
@@ -1073,6 +1699,7 @@ var MonitorStateService = class {
         totals: {
           inputTokens: 0,
           cacheReadTokens: 0,
+          cacheWriteTokens: 0,
           totalInputTokens: 0,
           outputTokens: 0,
           totalTokens: 0,
@@ -1085,7 +1712,10 @@ var MonitorStateService = class {
           status: "cold",
           note: null
         },
-        history: []
+        history: [],
+        sqliteEnabled: false,
+        performance: null,
+        liveStatus: null
       };
     }
     const metrics = this.tree.buildMetricsForScope(
@@ -1113,6 +1743,9 @@ var MonitorStateService = class {
       totals: metrics.totals,
       cache: metrics.cache,
       history: metrics.history,
+      sqliteEnabled: metrics.sqliteEnabled,
+      performance: metrics.performance,
+      liveStatus: metrics.liveStatus,
       transcriptError: metrics.transcriptError
     };
   }
@@ -1135,6 +1768,27 @@ var MonitorStateService = class {
       };
     }
   }
+  resetModelLimit(model) {
+    const { pluginDataDir } = resolvePluginDataAndSessionFile();
+    try {
+      deleteUserModelLimit(pluginDataDir, model);
+      this.tree.bumpVersion();
+      return {
+        ok: true,
+        model: model.trim(),
+        limitTokens: null,
+        reset: true
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        model: model.trim(),
+        limitTokens: null,
+        reset: true,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
 };
 var defaultService = new MonitorStateService();
 function buildHealthResponse() {
@@ -1145,6 +1799,9 @@ function buildMonitorStateResponse(params = {}) {
 }
 function updateModelLimit(model, limitTokens) {
   return defaultService.updateModelLimit(model, limitTokens);
+}
+function resetModelLimit(model) {
+  return defaultService.resetModelLimit(model);
 }
 
 // src/sidecar/main.ts
@@ -1190,6 +1847,17 @@ app.api(
 );
 app.api("/api/model-limit", (data) => {
   const model = data && typeof data.model === "string" ? data.model : "";
+  const isReset = data?.reset === true || data?.limitTokens === null;
+  if (isReset) {
+    const result2 = resetModelLimit(model);
+    if (!result2.ok) {
+      return new Response(JSON.stringify(result2), {
+        status: 400,
+        contentType: "application/json"
+      });
+    }
+    return result2;
+  }
   const rawLimit = data?.limitTokens;
   const limitTokens = typeof rawLimit === "number" ? rawLimit : Number(rawLimit);
   const result = updateModelLimit(model, limitTokens);

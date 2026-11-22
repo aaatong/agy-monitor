@@ -32,6 +32,7 @@
   --agy-warning: #bca136;
   /* Restrained token breakdown palette */
   --agy-token-cache: #1d8f6a;
+  --agy-token-cache-write: #c88a1e;
   --agy-token-input: var(--agy-primary);
   --agy-token-output: #7c5ce6;
   /* Derived tints */
@@ -74,6 +75,7 @@
   --agy-success: #7aae66;
   --agy-warning: #cab43e;
   --agy-token-cache: #3fb98f;
+  --agy-token-cache-write: #e0a938;
   --agy-token-input: var(--agy-primary);
   --agy-token-output: #a78bfa;
   --agy-canvas: color-mix(in srgb, #000000 18%, var(--agy-bg));
@@ -193,6 +195,34 @@ pre,
   background: inherit;
   opacity: 0.45;
   animation: agy-ping 2.4s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.agy-live-dot.is-thinking {
+  background-color: var(--agy-primary);
+}
+
+.agy-live-dot.is-thinking::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  opacity: 0.45;
+  animation: agy-ping 1.6s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.agy-live-dot.is-compacting {
+  background-color: var(--agy-warning);
+}
+
+.agy-live-dot.is-compacting::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  opacity: 0.45;
+  animation: agy-ping 1.6s cubic-bezier(0.22, 1, 0.36, 1) infinite;
 }
 
 .agy-live-dot.is-loading {

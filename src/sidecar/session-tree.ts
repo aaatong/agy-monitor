@@ -3,12 +3,22 @@ import path from 'node:path';
 import type {
   CacheStats,
   ContextWindowStats,
+  GenerationPerformance,
+  LiveExecutionStatus,
   RootSessionSummary,
   SessionRecord,
   SubsessionSummary,
   TokenTotals,
+  TurnHistoryPoint,
 } from '../shared/types.js';
 import { formatModelDisplayName, resolveModelLimit } from './models.js';
+import type { ParsedGenMetadata } from './protobuf.js';
+import {
+  computeSpeedStats,
+  SqliteMetricsStore,
+  type ConversationSqliteMetrics,
+  type DatabaseSyncConstructor,
+} from './sqlite-metrics.js';
 import {
   createEmptyTranscriptState,
   normalizeTranscriptPath,
@@ -27,39 +37,142 @@ function truncateLabel(text: string, maxLen = SUBSESSION_LABEL_MAX_LEN): string 
   return `${cleaned.slice(0, maxLen - 1).trimEnd()}…`;
 }
 
-function buildTotalsFromStates(states: Array<ParsedTranscriptState | undefined>): TokenTotals {
+function buildTotalsFromStates(
+  convIds: string[],
+  transcripts: Map<string, ParsedTranscriptState>,
+  sqliteMetrics: Map<string, ConversationSqliteMetrics | null>,
+): TokenTotals {
   let inputTokens = 0;
   let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
   let outputTokens = 0;
+  let thinkingTokens = 0;
+  let responseTokens = 0;
+  let hasThinkingSplit = false;
   let requestCount = 0;
 
-  for (const state of states) {
-    if (!state) continue;
-    inputTokens += state.totals.inputTokens;
-    cacheReadTokens += state.totals.cacheReadTokens;
-    outputTokens += state.totals.outputTokens;
-    requestCount += state.totals.requestCount;
+  for (const id of convIds) {
+    const state = transcripts.get(id);
+    if (state) {
+      inputTokens += state.totals.inputTokens;
+      cacheReadTokens += state.totals.cacheReadTokens;
+      outputTokens += state.totals.outputTokens;
+      requestCount += state.totals.requestCount;
+    }
+
+    const sql = sqliteMetrics.get(id);
+    if (sql && sql.validItems.length > 0) {
+      cacheWriteTokens += sql.totals.cacheWrite;
+      thinkingTokens += sql.totals.thinkTok;
+      responseTokens += sql.totals.respTok;
+      if (sql.totals.thinkTok > 0 || sql.totals.respTok > 0) {
+        hasThinkingSplit = true;
+      }
+    }
   }
 
-  const totalInputTokens = inputTokens + cacheReadTokens;
+  const totalInputTokens = inputTokens + cacheWriteTokens + cacheReadTokens;
   const totalTokens = totalInputTokens + outputTokens;
 
   return {
     inputTokens,
     cacheReadTokens,
+    cacheWriteTokens,
     totalInputTokens,
     outputTokens,
+    ...(hasThinkingSplit ? { thinkingTokens, responseTokens } : {}),
     totalTokens,
     requestCount,
   };
 }
 
+function enrichTurnsWithSqlite(
+  turns: TurnHistoryPoint[],
+  sql: ConversationSqliteMetrics | null | undefined,
+): TurnHistoryPoint[] {
+  if (!sql || sql.validItems.length === 0) {
+    return turns;
+  }
+
+  const items = sql.validItems;
+  const used = new Set<number>();
+  const matchedItems: Array<ParsedGenMetadata | null> = turns.map((t, idx) => {
+    // 1. Match by stepIndex in gen_metadata.stepIdxs
+    const byStep = items.findIndex(
+      (g, gi) => !used.has(gi) && g.stepIdxs.includes(t.stepIndex),
+    );
+    if (byStep !== -1) {
+      used.add(byStep);
+      return items[byStep]!;
+    }
+
+    // 2. Fallback: match by exact inTok + outTok
+    const byTokens = items.findIndex(
+      (g, gi) =>
+        !used.has(gi) && g.inTok === t.inputTokens && g.outTok === t.outputTokens,
+    );
+    if (byTokens !== -1) {
+      used.add(byTokens);
+      return items[byTokens]!;
+    }
+
+    // 3. Fallback: positional match if lengths match
+    if (turns.length === items.length && !used.has(idx)) {
+      used.add(idx);
+      return items[idx]!;
+    }
+
+    return null;
+  });
+
+  const cpIdxs = sql.compaction.checkpointIdxs;
+
+  return turns.map((t, idx) => {
+    const g = matchedItems[idx];
+    const prevStepIdx = idx > 0 ? turns[idx - 1]!.stepIndex : -1;
+    const compacted =
+      cpIdxs.length > 0
+        ? cpIdxs.some((cpIdx) => prevStepIdx < cpIdx && cpIdx < t.stepIndex)
+        : t.compacted;
+
+    if (!g) {
+      return compacted !== t.compacted ? { ...t, compacted } : t;
+    }
+
+    const promptTokens = g.inTok + g.cacheWrite + g.cacheRead;
+    const hitRate =
+      promptTokens > 0 ? round1((g.cacheRead / promptTokens) * 100) : 0;
+    const speed = computeSpeedStats(g.outTok, g.ttft, g.stream);
+
+    return {
+      ...t,
+      promptTokens,
+      cacheReadTokens: g.cacheRead,
+      cacheWriteTokens: g.cacheWrite,
+      thinkingTokens: g.thinkTok,
+      responseTokens: g.respTok,
+      ttftSec: Number(g.ttft.toFixed(2)),
+      streamSec: Number(g.stream.toFixed(2)),
+      totalSec: Number(g.totDur.toFixed(2)),
+      tps: speed.displayTps,
+      hitRate,
+      compacted,
+    };
+  });
+}
+
 export class SessionTreeManager {
   private readonly transcripts = new Map<string, ParsedTranscriptState>();
+  private readonly sqliteMetrics = new Map<string, ConversationSqliteMetrics | null>();
+  private readonly sqliteStore: SqliteMetricsStore;
   private parentToChildren = new Map<string, Set<string>>();
   private childToParent = new Map<string, string>();
   private childToRoot = new Map<string, string>();
   private version = 1;
+
+  constructor(databaseSyncCtor?: DatabaseSyncConstructor | null) {
+    this.sqliteStore = new SqliteMetricsStore(databaseSyncCtor);
+  }
 
   getVersion(): number {
     return this.version;
@@ -78,8 +191,14 @@ export class SessionTreeManager {
    * Discovers and incrementally syncs transcripts under `brainDir` plus any explicit
    * transcript paths from `active-session.json`.
    */
-  sync(brainDir: string, extraRecords: SessionRecord[] = []): boolean {
+  sync(
+    brainDir: string,
+    extraRecords: SessionRecord[] = [],
+    conversationsDir?: string,
+  ): boolean {
     let anyChanged = false;
+    const resolvedConvDir =
+      conversationsDir ?? path.join(path.dirname(brainDir), 'conversations');
     const queue = new Map<string, string>();
 
     for (const rec of extraRecords) {
@@ -160,6 +279,12 @@ export class SessionTreeManager {
       }
 
       if (needsSync && syncTranscriptState(state)) {
+        anyChanged = true;
+      }
+
+      const sqlRes = this.sqliteStore.sync(convId, resolvedConvDir);
+      this.sqliteMetrics.set(convId, sqlRes.metrics);
+      if (sqlRes.changed) {
         anyChanged = true;
       }
 
@@ -376,7 +501,11 @@ export class SessionTreeManager {
         parentLabel ||
         (childState?.title ? truncateLabel(childState.title) : `#${id.slice(0, 6)}`);
       const model = childState?.latestModel || 'unknown';
-      const totals = buildTotalsFromStates([childState]);
+      const totals = buildTotalsFromStates(
+        [id],
+        this.transcripts,
+        this.sqliteMetrics,
+      );
 
       return {
         id,
@@ -407,6 +536,9 @@ export class SessionTreeManager {
     totals: TokenTotals;
     cache: CacheStats;
     history: ParsedTranscriptState['turns'];
+    sqliteEnabled: boolean;
+    performance: GenerationPerformance | null;
+    liveStatus: LiveExecutionStatus | null;
     transcriptError?: string;
   } {
     const rootState = this.transcripts.get(rootId);
@@ -415,7 +547,10 @@ export class SessionTreeManager {
     const effectiveScope = this.resolveEffectiveScope(rootId, scope);
 
     const isChildScope = effectiveScope !== 'main' && effectiveScope !== 'all';
-    const targetState = isChildScope ? this.transcripts.get(effectiveScope) : rootState;
+    const targetId = isChildScope ? effectiveScope : rootId;
+    const targetState = this.transcripts.get(targetId);
+    const targetSql = this.sqliteMetrics.get(targetId) ?? null;
+
     const model = isChildScope
       ? targetState?.latestModel || 'unknown'
       : rootState?.latestModel || fallbackModel || 'unknown';
@@ -423,11 +558,12 @@ export class SessionTreeManager {
 
     const totals =
       effectiveScope === 'all'
-        ? buildTotalsFromStates([
-            rootState,
-            ...descendants.map((id) => this.transcripts.get(id)),
-          ])
-        : buildTotalsFromStates([targetState]);
+        ? buildTotalsFromStates(
+            [rootId, ...descendants],
+            this.transcripts,
+            this.sqliteMetrics,
+          )
+        : buildTotalsFromStates([targetId], this.transcripts, this.sqliteMetrics);
 
     const activeScopeLabel =
       effectiveScope === 'all'
@@ -438,28 +574,62 @@ export class SessionTreeManager {
             `#${effectiveScope.slice(0, 6)}`);
 
     // Context window & turn history from targetState (root for 'main'/'all', child for child scope)
-    const turns = targetState?.turns ?? [];
+    const rawTurns = targetState?.turns ?? [];
+    const turns = enrichTurnsWithSqlite(rawTurns, targetSql);
     const lastTurn = turns.length > 0 ? turns[turns.length - 1]! : null;
+    const lastSqlValid =
+      targetSql && targetSql.validItems.length > 0
+        ? targetSql.validItems[targetSql.validItems.length - 1]!
+        : null;
 
     let contextWindow: ContextWindowStats | null = null;
     if (lastTurn) {
-      const { limitTokens, limitSource } = resolveModelLimit(model, userLimits);
+      const nativeLimitTokens =
+        targetSql && targetSql.nativeContextLimit > 0
+          ? targetSql.nativeContextLimit
+          : undefined;
+      const { limitTokens, limitSource } = resolveModelLimit(
+        model,
+        userLimits,
+        nativeLimitTokens,
+      );
+      const cacheWriteTokens = lastTurn.cacheWriteTokens ?? 0;
       const estimatedNextTokens = lastTurn.promptTokens + lastTurn.outputTokens;
+      const compactedCount =
+        targetSql && targetSql.compaction.checkpointIdxs.length > 0
+          ? targetSql.compaction.checkpointIdxs.length
+          : (targetState?.compactedCount ?? 0);
+
       contextWindow = {
         promptTokens: lastTurn.promptTokens,
         cacheReadTokens: lastTurn.cacheReadTokens,
+        cacheWriteTokens,
         inputTokens: lastTurn.inputTokens,
         lastOutputTokens: lastTurn.outputTokens,
+        ...(lastSqlValid && (lastSqlValid.thinkTok > 0 || lastSqlValid.respTok > 0)
+          ? {
+              lastThinkingTokens: lastSqlValid.thinkTok,
+              lastResponseTokens: lastSqlValid.respTok,
+            }
+          : {}),
         estimatedNextTokens,
         limitTokens,
+        ...(nativeLimitTokens ? { nativeLimitTokens } : {}),
         limitSource,
         usagePercent: limitTokens > 0 ? round1((lastTurn.promptTokens / limitTokens) * 100) : 0,
         estimatedNextPercent:
           limitTokens > 0 ? round1((estimatedNextTokens / limitTokens) * 100) : 0,
-        compactedCount: targetState?.compactedCount ?? 0,
+        compactedCount,
         lastCompactedTurn: targetState?.lastCompactedTurn ?? null,
         lastCompactedStep: targetState?.lastCompactedStep ?? null,
         previousPromptBeforeCompact: targetState?.previousPromptBeforeCompact ?? null,
+        ...(targetSql
+          ? {
+              compactingNow: targetSql.compaction.compactingNow,
+              compactedPending: targetSql.compaction.compactedPending,
+              compactSummaryKb: targetSql.compaction.compactSummaryKb,
+            }
+          : {}),
       };
     }
 
@@ -503,6 +673,9 @@ export class SessionTreeManager {
         note,
       },
       history: turns,
+      sqliteEnabled: Boolean(targetSql),
+      performance: targetSql?.latestPerformance ?? null,
+      liveStatus: targetSql?.liveStatus ?? null,
       transcriptError: targetState?.lastError,
     };
   }

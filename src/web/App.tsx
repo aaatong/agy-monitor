@@ -7,9 +7,10 @@ import type {
 import { BrandLogo } from './components/BrandLogo';
 import { CacheCard } from './components/CacheCard';
 import { ContextCard } from './components/ContextCard';
+import { PerformanceCard } from './components/PerformanceCard';
 import { TotalsCard } from './components/TotalsCard';
 import { TrendChart } from './components/TrendChart';
-import { fetchMonitorState, saveModelLimit } from './utils/api';
+import { fetchMonitorState, resetModelLimit, saveModelLimit } from './utils/api';
 import { fmtTokens, syncThemeAttribute } from './utils/format';
 
 const POLL_INTERVAL_MS = 1200;
@@ -17,6 +18,7 @@ const POLL_INTERVAL_MS = 1200;
 const EMPTY_TOTALS: TokenTotals = {
   inputTokens: 0,
   cacheReadTokens: 0,
+  cacheWriteTokens: 0,
   totalInputTokens: 0,
   outputTokens: 0,
   totalTokens: 0,
@@ -229,6 +231,15 @@ export function App() {
     await fetchState(true);
   };
 
+  const handleResetLimit = async (model: string) => {
+    const res = await resetModelLimit(model);
+    if (!res.ok) {
+      throw new Error(res.error || '恢复上下文上限失败');
+    }
+    versionRef.current = undefined;
+    await fetchState(true);
+  };
+
   const connected = !error && state?.ok === true;
   const subagentCount = state?.subagentCount ?? 0;
   const recentRoots = state?.recentRoots ?? [];
@@ -341,13 +352,50 @@ export function App() {
           ? '本地扫描'
           : '待机';
 
-  const statusText = connected ? '实时' : loading ? '连接中' : '未连接';
+  const liveState = connected ? state?.liveStatus?.state : undefined;
+  const statusDotClass = !connected
+    ? loading
+      ? 'is-loading'
+      : 'is-error'
+    : liveState === 'compacting'
+      ? 'is-compacting'
+      : liveState === 'thinking' || liveState === 'tool'
+        ? 'is-thinking'
+        : 'is-live';
+
+  const statusText = !connected
+    ? loading
+      ? '连接中'
+      : '未连接'
+    : liveState === 'compacting'
+      ? '压缩中'
+      : liveState === 'thinking'
+        ? '思考中'
+        : liveState === 'tool'
+          ? '工具中'
+          : '实时';
+
+  const statusElapsedSec =
+    connected &&
+    state?.liveStatus &&
+    state.liveStatus.state !== 'idle' &&
+    state.liveStatus.pendingStartedAtMs > 0
+      ? Math.max(
+          0,
+          Math.floor((Date.now() - state.liveStatus.pendingStartedAtMs) / 1000),
+        )
+      : 0;
+  const fullSourceLabel = `${sourceLabel}${state?.sqliteEnabled ? ' + SQLite' : ''}`;
+  const statusTitle =
+    connected && state?.liveStatus && state.liveStatus.state !== 'idle'
+      ? `Step #${state.liveStatus.pendingStepIdx}${statusElapsedSec > 0 ? ` · 已等待 ${statusElapsedSec}s` : ''}`
+      : `数据源 · ${fullSourceLabel}`;
 
   return (
     <div class="agy-shell min-h-full flex flex-col">
       {/* Sticky quiet header */}
       <header class="agy-header">
-        <div class="w-full max-w-[680px] mx-auto px-3.5 pt-2.5 pb-2 flex flex-col gap-2">
+        <div class="w-full max-w-[680px] mx-auto px-3 pt-2 pb-2 flex flex-col gap-1.5">
           <div class="flex items-center justify-between gap-2 min-w-0">
             <div class="flex items-center gap-2 shrink-0">
               <BrandLogo size={18} />
@@ -360,11 +408,9 @@ export function App() {
               <span
                 class="inline-flex items-center gap-1.5 text-[12px] whitespace-nowrap"
                 style={{ color: 'var(--agy-muted)' }}
-                title={`数据源 · ${sourceLabel}`}
+                title={statusTitle}
               >
-                <span
-                  class={`agy-live-dot ${connected ? 'is-live' : loading ? 'is-loading' : 'is-error'}`}
-                />
+                <span class={`agy-live-dot ${statusDotClass}`} />
                 <span>{statusText}</span>
               </span>
 
@@ -553,7 +599,7 @@ export function App() {
         </div>
       </header>
 
-      <div class="w-full max-w-[680px] mx-auto px-3.5 py-3.5 flex-1 flex flex-col gap-3.5">
+      <div class="w-full max-w-[680px] mx-auto px-3 py-2.5 flex-1 flex flex-col gap-2.5">
         {error && (
           <div
             class="rounded-[8px] px-3 py-2 text-[12px] border shrink-0"
@@ -585,13 +631,20 @@ export function App() {
         )}
 
         {/* 主体卡片流 */}
-        <main class="flex-1 flex flex-col gap-3.5">
+        <main class="flex-1 flex flex-col gap-2.5">
           <ContextCard
             contextWindow={state?.contextWindow ?? null}
             model={state?.model ?? ''}
             activeScope={activeScope}
             activeScopeLabel={activeScopeLabel}
             onSaveLimit={handleSaveLimit}
+            onResetLimit={handleResetLimit}
+          />
+
+          <PerformanceCard
+            performance={state?.performance ?? null}
+            activeScope={activeScope}
+            activeScopeLabel={activeScopeLabel}
           />
 
           <TotalsCard
@@ -613,7 +666,7 @@ export function App() {
           class="flex items-center justify-between text-[11px] pt-0.5 pb-1.5 shrink-0 tabular-nums"
           style={{ color: 'var(--agy-muted)' }}
         >
-          <span>数据源 · {sourceLabel}</span>
+          <span>数据源 · {fullSourceLabel}</span>
           <span>同步于 {formatClock(lastSyncAt)}</span>
         </footer>
       </div>

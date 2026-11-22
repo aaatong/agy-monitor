@@ -133,6 +133,7 @@ describe('session-tree', () => {
     expect(metrics.totals).toEqual({
       inputTokens: 10_000 + 5_000 + 4_000 + 1_000,
       cacheReadTokens: 0 + 15_000 + 6_000 + 3_000,
+      cacheWriteTokens: 0,
       totalInputTokens: 20_000 + 24_000,
       outputTokens: 200 + 300 + 150 + 50,
       totalTokens: 44_700,

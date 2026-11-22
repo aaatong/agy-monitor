@@ -5,6 +5,7 @@ import { Response, SidecarApp } from 'sidecar_sdk';
 import {
   buildHealthResponse,
   buildMonitorStateResponse,
+  resetModelLimit,
   updateModelLimit,
 } from './state.js';
 
@@ -71,6 +72,18 @@ app.api(
 
 app.api('/api/model-limit', (data) => {
   const model = data && typeof data.model === 'string' ? data.model : '';
+  const isReset = data?.reset === true || data?.limitTokens === null;
+  if (isReset) {
+    const result = resetModelLimit(model);
+    if (!result.ok) {
+      return new Response(JSON.stringify(result), {
+        status: 400,
+        contentType: 'application/json',
+      });
+    }
+    return result;
+  }
+
   const rawLimit = data?.limitTokens;
   const limitTokens = typeof rawLimit === 'number' ? rawLimit : Number(rawLimit);
   const result = updateModelLimit(model, limitTokens);

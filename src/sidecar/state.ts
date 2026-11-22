@@ -10,6 +10,7 @@ import type {
   SessionSource,
 } from '../shared/types.js';
 import {
+  deleteUserModelLimit,
   formatModelDisplayName,
   loadUserModelLimits,
   saveUserModelLimit,
@@ -264,7 +265,8 @@ export class MonitorStateService {
       });
     }
 
-    this.tree.sync(brainDir, extraRecords);
+    const conversationsDir = path.join(path.dirname(brainDir), 'conversations');
+    this.tree.sync(brainDir, extraRecords, conversationsDir);
 
     let source: SessionSource = 'none';
     let activeRootId: string | null = null;
@@ -351,6 +353,7 @@ export class MonitorStateService {
         totals: {
           inputTokens: 0,
           cacheReadTokens: 0,
+          cacheWriteTokens: 0,
           totalInputTokens: 0,
           outputTokens: 0,
           totalTokens: 0,
@@ -364,6 +367,9 @@ export class MonitorStateService {
           note: null,
         },
         history: [],
+        sqliteEnabled: false,
+        performance: null,
+        liveStatus: null,
       };
     }
 
@@ -393,6 +399,9 @@ export class MonitorStateService {
       totals: metrics.totals,
       cache: metrics.cache,
       history: metrics.history,
+      sqliteEnabled: metrics.sqliteEnabled,
+      performance: metrics.performance,
+      liveStatus: metrics.liveStatus,
       transcriptError: metrics.transcriptError,
     };
   }
@@ -416,6 +425,28 @@ export class MonitorStateService {
       };
     }
   }
+
+  resetModelLimit(model: string): ModelLimitResponse {
+    const { pluginDataDir } = resolvePluginDataAndSessionFile();
+    try {
+      deleteUserModelLimit(pluginDataDir, model);
+      this.tree.bumpVersion();
+      return {
+        ok: true,
+        model: model.trim(),
+        limitTokens: null,
+        reset: true,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        model: model.trim(),
+        limitTokens: null,
+        reset: true,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
 }
 
 const defaultService = new MonitorStateService();
@@ -430,4 +461,8 @@ export function buildMonitorStateResponse(params: StateQueryParams = {}): Monito
 
 export function updateModelLimit(model: string, limitTokens: number): ModelLimitResponse {
   return defaultService.updateModelLimit(model, limitTokens);
+}
+
+export function resetModelLimit(model: string): ModelLimitResponse {
+  return defaultService.resetModelLimit(model);
 }

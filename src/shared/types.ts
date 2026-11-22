@@ -15,9 +15,30 @@ export interface ActiveSessionFile {
 
 export type SessionSource = 'hook' | 'pane' | 'fallback' | 'none';
 
-export type ModelLimitSource = 'custom' | 'builtin' | 'default';
+export type ModelLimitSource = 'custom' | 'native' | 'builtin' | 'default';
 
 export type CacheStatus = 'healthy' | 'low' | 'cold';
+
+export type LiveExecutionState = 'idle' | 'thinking' | 'tool' | 'compacting';
+
+export interface LiveExecutionStatus {
+  state: LiveExecutionState;
+  pendingStepIdx: number;
+  pendingStartedAtMs: number;
+}
+
+export interface GenerationPerformance {
+  stepIndex: number;
+  streamTps: number;
+  e2eTps: number;
+  displayTps: number;
+  usedE2eFallback: boolean;
+  ttftSec: number;
+  streamSec: number;
+  totalSec: number;
+  avgStreamTps: number;
+  avgTtftSec: number;
+}
 
 export interface RootSessionSummary {
   id: string;
@@ -42,10 +63,14 @@ export interface SubsessionSummary {
 export interface ContextWindowStats {
   promptTokens: number;
   cacheReadTokens: number;
+  cacheWriteTokens: number;
   inputTokens: number;
   lastOutputTokens: number;
+  lastThinkingTokens?: number;
+  lastResponseTokens?: number;
   estimatedNextTokens: number;
   limitTokens: number;
+  nativeLimitTokens?: number;
   limitSource: ModelLimitSource;
   usagePercent: number;
   estimatedNextPercent: number;
@@ -53,13 +78,19 @@ export interface ContextWindowStats {
   lastCompactedTurn: number | null;
   lastCompactedStep: number | null;
   previousPromptBeforeCompact: number | null;
+  compactingNow?: boolean;
+  compactedPending?: boolean;
+  compactSummaryKb?: number;
 }
 
 export interface TokenTotals {
   inputTokens: number;
   cacheReadTokens: number;
+  cacheWriteTokens: number;
   totalInputTokens: number;
   outputTokens: number;
+  thinkingTokens?: number;
+  responseTokens?: number;
   totalTokens: number;
   requestCount: number;
 }
@@ -78,8 +109,15 @@ export interface TurnHistoryPoint {
   ts?: string;
   promptTokens: number;
   cacheReadTokens: number;
+  cacheWriteTokens?: number;
   inputTokens: number;
   outputTokens: number;
+  thinkingTokens?: number;
+  responseTokens?: number;
+  ttftSec?: number;
+  streamSec?: number;
+  totalSec?: number;
+  tps?: number;
   hitRate: number;
   compacted: boolean;
 }
@@ -109,6 +147,9 @@ export interface MonitorStateFullResponse {
   totals: TokenTotals;
   cache: CacheStats;
   history: TurnHistoryPoint[];
+  sqliteEnabled: boolean;
+  performance: GenerationPerformance | null;
+  liveStatus: LiveExecutionStatus | null;
   transcriptError?: string;
 }
 
@@ -118,13 +159,15 @@ export type MonitorStateResponse =
 
 export interface ModelLimitRequest {
   model: string;
-  limitTokens: number;
+  limitTokens: number | null;
+  reset?: boolean;
 }
 
 export interface ModelLimitResponse {
   ok: boolean;
   model: string;
-  limitTokens: number;
+  limitTokens: number | null;
+  reset?: boolean;
   error?: string;
 }
 

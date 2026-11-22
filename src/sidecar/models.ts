@@ -100,18 +100,66 @@ export function saveUserModelLimit(
   return current;
 }
 
+export function deleteUserModelLimit(
+  pluginDataDir: string,
+  model: string,
+): Record<string, number> {
+  const key = normalizeModelKey(model);
+  const current = loadUserModelLimits(pluginDataDir);
+  if (!key || !(key in current)) {
+    return current;
+  }
+  delete current[key];
+
+  const filePath = path.join(pluginDataDir, 'user-models.json');
+  try {
+    fs.mkdirSync(pluginDataDir, { recursive: true });
+    const tmpPath = path.join(
+      pluginDataDir,
+      `.user-models.${process.pid}.${Date.now()}.tmp`,
+    );
+    fs.writeFileSync(tmpPath, JSON.stringify(current, null, 2) + '\n', 'utf8');
+    fs.renameSync(tmpPath, filePath);
+  } catch {
+    // ignore write failure if dir cannot be created
+  }
+  return current;
+}
+
 export function resolveModelLimit(
   model: string,
   userLimits: Record<string, number> = {},
+  nativeLimitTokens?: number,
 ): ModelLimitLookup {
   const key = normalizeModelKey(model);
   if (!key) {
+    if (
+      typeof nativeLimitTokens === 'number' &&
+      Number.isFinite(nativeLimitTokens) &&
+      nativeLimitTokens > 0
+    ) {
+      return {
+        limitTokens: Math.round(nativeLimitTokens),
+        limitSource: 'native',
+      };
+    }
     return { limitTokens: config.defaultLimit, limitSource: 'default' };
   }
 
   const custom = userLimits[key];
   if (typeof custom === 'number' && custom > 0) {
     return { limitTokens: custom, limitSource: 'custom' };
+  }
+
+  if (
+    typeof nativeLimitTokens === 'number' &&
+    Number.isFinite(nativeLimitTokens) &&
+    nativeLimitTokens > 0
+  ) {
+    return {
+      limitTokens: Math.round(nativeLimitTokens),
+      limitSource: 'native',
+    };
   }
 
   const exact = config.exact[key];

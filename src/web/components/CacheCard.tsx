@@ -27,7 +27,7 @@ export function CacheCard({ cache }: CacheCardProps) {
   const barColor = cache.isFirstTurn ? 'var(--agy-primary)' : statusColor;
 
   return (
-    <section class="agy-card p-3.5 space-y-2.5">
+    <section class="agy-card p-3 space-y-2">
       <div class="flex items-center justify-between gap-2">
         <h2 class="text-[13px] font-semibold tracking-tight">缓存命中率</h2>
         <span
@@ -40,7 +40,7 @@ export function CacheCard({ cache }: CacheCardProps) {
 
       <div class="flex items-baseline justify-between gap-2 tabular-nums">
         <span
-          class="text-[22px] leading-none font-semibold"
+          class="text-[20px] leading-none font-semibold"
           style={{ color: 'var(--agy-fg)' }}
         >
           {fmtPct(cache.overallHitRate)}

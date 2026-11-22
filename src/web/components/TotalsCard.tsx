@@ -32,16 +32,50 @@ export function TotalsCard({
 
   const total = totals.totalTokens;
   const cacheShare = total > 0 ? (totals.cacheReadTokens / total) * 100 : 0;
+  const cacheWriteShare =
+    total > 0 ? (totals.cacheWriteTokens / total) * 100 : 0;
   const inputShare = total > 0 ? (totals.inputTokens / total) * 100 : 0;
   const outputShare = total > 0 ? (totals.outputTokens / total) * 100 : 0;
 
-  const rows = [
+  let outputSubText: string | null = null;
+  if (
+    totals.thinkingTokens !== undefined &&
+    totals.thinkingTokens > 0 &&
+    totals.outputTokens > 0
+  ) {
+    const thinkPct = Math.round(
+      (totals.thinkingTokens / totals.outputTokens) * 100,
+    );
+    const respPct = Math.max(0, 100 - thinkPct);
+    const respTok =
+      totals.responseTokens ??
+      Math.max(0, totals.outputTokens - totals.thinkingTokens);
+    outputSubText = `↳ 思考 ${fmtTokens(totals.thinkingTokens)} (${thinkPct}%) · 正文 ${fmtTokens(respTok)} (${respPct}%)`;
+  }
+
+  const rows: Array<{
+    label: string;
+    tokens: number;
+    share: number;
+    color: string;
+    subText?: string | null;
+  }> = [
     {
       label: '缓存读取',
       tokens: totals.cacheReadTokens,
       share: cacheShare,
       color: 'var(--agy-token-cache)',
     },
+    ...(totals.cacheWriteTokens > 0
+      ? [
+          {
+            label: '缓存写入',
+            tokens: totals.cacheWriteTokens,
+            share: cacheWriteShare,
+            color: 'var(--agy-token-cache-write)',
+          },
+        ]
+      : []),
     {
       label: '新增输入',
       tokens: totals.inputTokens,
@@ -53,11 +87,12 @@ export function TotalsCard({
       tokens: totals.outputTokens,
       share: outputShare,
       color: 'var(--agy-token-output)',
+      subText: outputSubText,
     },
   ];
 
   return (
-    <section class="agy-card p-3.5 space-y-3">
+    <section class="agy-card p-3 space-y-2.5">
       {/* Top hero row */}
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
@@ -72,13 +107,13 @@ export function TotalsCard({
 
         <div class="text-right shrink-0" title={fmtExact(total)}>
           <div
-            class="text-[21px] font-semibold tabular-nums leading-none tracking-tight"
+            class="text-[19px] font-semibold tabular-nums leading-none tracking-tight"
             style={{ color: 'var(--agy-fg)' }}
           >
             {fmtTokens(total)}
           </div>
           <div
-            class="text-[11px] mt-1"
+            class="text-[11px] mt-0.5"
             style={{ color: 'var(--agy-muted)' }}
           >
             总消耗
@@ -106,36 +141,43 @@ export function TotalsCard({
         )}
       </div>
 
-      {/* Clean 3-row breakdown */}
-      <div class="space-y-1.5">
+      {/* Clean breakdown */}
+      <div class="space-y-1">
         {rows.map((row) => (
-          <div
-            key={row.label}
-            class="flex items-center justify-between gap-2 text-[12.5px]"
-          >
-            <div class="flex items-center gap-2 min-w-0">
-              <span
-                class="w-[7px] h-[7px] rounded-full shrink-0"
-                style={{ backgroundColor: row.color }}
-              />
-              <span style={{ color: 'var(--agy-fg-2)' }}>{row.label}</span>
-            </div>
+          <div key={row.label} class="space-y-0.5">
+            <div class="flex items-center justify-between gap-2 text-[12.5px]">
+              <div class="flex items-center gap-2 min-w-0">
+                <span
+                  class="w-[7px] h-[7px] rounded-full shrink-0"
+                  style={{ backgroundColor: row.color }}
+                />
+                <span style={{ color: 'var(--agy-fg-2)' }}>{row.label}</span>
+              </div>
 
-            <div class="flex items-center gap-2 tabular-nums shrink-0">
-              <span
-                class="text-[13.5px] font-semibold"
-                style={{ color: 'var(--agy-fg)' }}
-                title={fmtExact(row.tokens)}
-              >
-                {fmtTokens(row.tokens)}
-              </span>
-              <span
-                class="w-12 text-right text-[12px]"
+              <div class="flex items-center gap-2 tabular-nums shrink-0">
+                <span
+                  class="text-[13.5px] font-semibold"
+                  style={{ color: 'var(--agy-fg)' }}
+                  title={fmtExact(row.tokens)}
+                >
+                  {fmtTokens(row.tokens)}
+                </span>
+                <span
+                  class="w-12 text-right text-[12px]"
+                  style={{ color: 'var(--agy-muted)' }}
+                >
+                  {fmtPct(row.share)}
+                </span>
+              </div>
+            </div>
+            {row.subText && (
+              <div
+                class="pl-[15px] text-[11.5px] tabular-nums"
                 style={{ color: 'var(--agy-muted)' }}
               >
-                {fmtPct(row.share)}
-              </span>
-            </div>
+                {row.subText}
+              </div>
+            )}
           </div>
         ))}
       </div>

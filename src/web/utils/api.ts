@@ -77,3 +77,9 @@ export async function saveModelLimit(
   }
   return (await res.json()) as ModelLimitResponse;
 }
+
+export async function resetModelLimit(
+  model: string,
+): Promise<ModelLimitResponse> {
+  return saveModelLimit({ model, limitTokens: null, reset: true });
+}

@@ -1,21 +1,21 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { TurnHistoryPoint } from '../../shared/types';
-import { fmtPct, fmtTokens } from '../utils/format';
+import { fmtExact, fmtPct, fmtTokens } from '../utils/format';
 
 interface TrendChartProps {
   history: TurnHistoryPoint[];
   limitTokens: number;
 }
 
-type ChartTab = 'context' | 'cache';
+type ChartTab = 'context' | 'cache' | 'speed';
 
-const PAD = { top: 14, right: 10, bottom: 22, left: 42 };
+const PAD = { top: 10, right: 10, bottom: 18, left: 42 };
 
 export function TrendChart({ history, limitTokens }: TrendChartProps) {
   const [tab, setTab] = useState<ChartTab>('context');
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [box, setBox] = useState({ width: 360, height: 145 });
+  const [box, setBox] = useState({ width: 360, height: 108 });
 
   useEffect(() => {
     const el = containerRef.current;
@@ -24,7 +24,7 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
     const update = () => {
       const rect = el.getBoundingClientRect();
       const w = Math.max(240, Math.round(rect.width));
-      const h = Math.max(130, Math.round(rect.height));
+      const h = Math.max(96, Math.round(rect.height));
       setBox((prev) =>
         prev.width === w && prev.height === h ? prev : { width: w, height: h },
       );
@@ -36,8 +36,15 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
     return () => ro.disconnect();
   }, []);
 
-  const isCtx = tab === 'context';
-  const lineColor = isCtx ? 'var(--agy-primary)' : 'var(--agy-fg-2)';
+  const hasSpeed = history.some((p) => typeof p.tps === 'number' && p.tps > 0);
+  const effectiveTab: ChartTab = !hasSpeed && tab === 'speed' ? 'context' : tab;
+  const isCtx = effectiveTab === 'context';
+  const isSpeed = effectiveTab === 'speed';
+  const lineColor = isCtx
+    ? 'var(--agy-primary)'
+    : isSpeed
+      ? 'var(--agy-token-output)'
+      : 'var(--agy-fg-2)';
   const safeLimit = limitTokens > 0 ? limitTokens : 256_000;
 
   const SVG_W = box.width;
@@ -47,6 +54,25 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
 
   const maxPrompt =
     history.length > 0 ? Math.max(...history.map((p) => p.promptTokens)) : 0;
+  const maxTps =
+    history.length > 0 ? Math.max(...history.map((p) => p.tps ?? 0), 100) : 100;
+  const speedPoints = history.filter((p) => typeof p.tps === 'number' && p.tps > 0);
+  const avgTps =
+    speedPoints.length > 0
+      ? Math.round(
+          speedPoints.reduce((sum, p) => sum + (p.tps ?? 0), 0) / speedPoints.length,
+        )
+      : 0;
+  const ttftPoints = history.filter(
+    (p) => typeof p.ttftSec === 'number' && p.ttftSec > 0,
+  );
+  const avgTtft =
+    ttftPoints.length > 0
+      ? (
+          ttftPoints.reduce((sum, p) => sum + (p.ttftSec ?? 0), 0) /
+          ttftPoints.length
+        ).toFixed(1)
+      : '0.0';
   const avgHitRate =
     history.length > 1
       ? history.slice(1).reduce((sum, p) => sum + p.hitRate, 0) /
@@ -58,7 +84,9 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
 
   const maxVal = isCtx
     ? Math.max(maxPrompt, safeLimit * 0.3, 1000) * 1.15
-    : 100;
+    : isSpeed
+      ? Math.ceil((maxTps * 1.18) / 50) * 50 || 100
+      : 100;
 
   const xFor = (i: number): number =>
     PAD.left +
@@ -67,11 +95,11 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
   const yFor = (v: number): number =>
     PAD.top + PLOT_H - (Math.min(Math.max(v, 0), maxVal) / maxVal) * PLOT_H;
 
-  const ticks = isCtx ? [0, maxVal * 0.5, maxVal] : [0, 50, 100];
+  const ticks = [0, maxVal * 0.5, maxVal];
 
   const coords = history.map((p, i) => [
     xFor(i),
-    yFor(isCtx ? p.promptTokens : p.hitRate),
+    yFor(isCtx ? p.promptTokens : isSpeed ? (p.tps ?? 0) : p.hitRate),
   ] as const);
 
   const linePath =
@@ -105,7 +133,7 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
       : null;
 
   return (
-    <section class="agy-card p-3.5 flex-1 flex flex-col gap-2.5 min-h-[210px]">
+    <section class="agy-card p-3 flex-1 flex flex-col gap-2 min-h-[164px]">
       <div class="flex items-center justify-between gap-2 shrink-0">
         <h2 class="text-[13px] font-semibold tracking-tight">轮次走势</h2>
 
@@ -125,8 +153,8 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
           <button
             type="button"
             role="tab"
-            aria-selected={!isCtx}
-            class={!isCtx ? 'on' : ''}
+            aria-selected={effectiveTab === 'cache'}
+            class={effectiveTab === 'cache' ? 'on' : ''}
             onClick={() => {
               setTab('cache');
               setHoveredIdx(null);
@@ -134,13 +162,27 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
           >
             缓存
           </button>
+          {hasSpeed && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={isSpeed}
+              class={isSpeed ? 'on' : ''}
+              onClick={() => {
+                setTab('speed');
+                setHoveredIdx(null);
+              }}
+            >
+              速度
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Responsive SVG fills remaining vertical height */}
+      {/* Responsive SVG fills remaining vertical height without locking container size */}
       <div
         ref={containerRef}
-        class="relative flex-1 min-h-[130px] w-full flex items-stretch"
+        class="relative flex-1 min-h-[96px] w-full flex items-stretch"
       >
         {history.length === 0 ? (
           <div
@@ -156,10 +198,8 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
         ) : (
           <>
             <svg
-              width={SVG_W}
-              height={SVG_H}
               viewBox={`0 0 ${SVG_W} ${SVG_H}`}
-              class="w-full h-full overflow-visible block"
+              class="absolute inset-0 w-full h-full overflow-visible block"
             >
               <defs>
                 <linearGradient id="agyAreaGrad" x1="0" y1="0" x2="0" y2="1">
@@ -172,7 +212,9 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
                 const y = yFor(t);
                 const label = isCtx
                   ? fmtTokens(Math.round(t))
-                  : `${Math.round(t)}%`;
+                  : isSpeed
+                    ? String(Math.round(t))
+                    : `${Math.round(t)}%`;
                 return (
                   <g key={idx}>
                     <line
@@ -330,6 +372,33 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
                     {fmtPct(hoveredPoint.hitRate)}
                   </strong>
                 </div>
+                {hoveredPoint.tps !== undefined && hoveredPoint.tps > 0 && (
+                  <div style={{ color: 'var(--agy-muted)' }}>
+                    速度{' '}
+                    <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
+                      {hoveredPoint.tps} tok/s
+                    </strong>
+                    {hoveredPoint.ttftSec !== undefined && hoveredPoint.ttftSec > 0
+                      ? ` · TTFT ${hoveredPoint.ttftSec.toFixed(1)}s`
+                      : ''}
+                  </div>
+                )}
+                {hoveredPoint.thinkingTokens !== undefined &&
+                  hoveredPoint.thinkingTokens > 0 && (
+                    <div style={{ color: 'var(--agy-muted)' }}>
+                      输出 {fmtTokens(hoveredPoint.outputTokens)} (思{' '}
+                      {fmtExact(hoveredPoint.thinkingTokens)} · 正{' '}
+                      {fmtExact(
+                        hoveredPoint.responseTokens ??
+                          Math.max(
+                            0,
+                            hoveredPoint.outputTokens -
+                              hoveredPoint.thinkingTokens,
+                          ),
+                      )}
+                      )
+                    </div>
+                  )}
               </div>
             )}
           </>
@@ -338,34 +407,54 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
 
       {/* Inline hairline summary strip */}
       <div
-        class="pt-2 border-t flex items-center justify-between text-[12px] tabular-nums shrink-0"
+        class="pt-1.5 border-t flex items-center justify-between text-[12px] tabular-nums shrink-0"
         style={{
           borderColor: 'var(--agy-line)',
           color: 'var(--agy-muted)',
         }}
       >
         <span>{history.length} 轮</span>
-        <span>
-          峰值{' '}
-          <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
-            {history.length > 0 ? fmtTokens(maxPrompt) : '--'}
-          </strong>
-        </span>
-        <span>
-          {compactCount > 0 ? '压缩 ' : '均命中 '}
-          <strong
-            class="font-medium"
-            style={{
-              color: compactCount > 0 ? 'var(--agy-warning)' : 'var(--agy-fg)',
-            }}
-          >
-            {compactCount > 0
-              ? `${compactCount} 次`
-              : history.length > 0
-                ? fmtPct(avgHitRate)
-                : '--'}
-          </strong>
-        </span>
+        {isSpeed ? (
+          <>
+            <span>
+              均速{' '}
+              <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
+                {avgTps > 0 ? `${avgTps} tok/s` : '--'}
+              </strong>
+            </span>
+            <span>
+              均 TTFT{' '}
+              <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
+                {ttftPoints.length > 0 ? `${avgTtft}s` : '--'}
+              </strong>
+            </span>
+          </>
+        ) : (
+          <>
+            <span>
+              峰值{' '}
+              <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
+                {history.length > 0 ? fmtTokens(maxPrompt) : '--'}
+              </strong>
+            </span>
+            <span>
+              {compactCount > 0 ? '压缩 ' : '均命中 '}
+              <strong
+                class="font-medium"
+                style={{
+                  color:
+                    compactCount > 0 ? 'var(--agy-warning)' : 'var(--agy-fg)',
+                }}
+              >
+                {compactCount > 0
+                  ? `${compactCount} 次`
+                  : history.length > 0
+                    ? fmtPct(avgHitRate)
+                    : '--'}
+              </strong>
+            </span>
+          </>
+        )}
       </div>
     </section>
   );

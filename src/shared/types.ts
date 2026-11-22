@@ -107,6 +107,8 @@ export interface TurnHistoryPoint {
   turn: number;
   stepIndex: number;
   ts?: string;
+  model?: string;
+  modelDisplayName?: string;
   promptTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens?: number;
@@ -120,6 +122,23 @@ export interface TurnHistoryPoint {
   tps?: number;
   hitRate: number;
   compacted: boolean;
+}
+
+export interface ModelBreakdownItem {
+  model: string;
+  modelDisplayName: string;
+  requestCount: number;
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalInputTokens: number;
+  outputTokens: number;
+  thinkingTokens?: number;
+  responseTokens?: number;
+  totalTokens: number;
+  hitRate: number;
+  avgTps?: number;
+  avgTtftSec?: number;
 }
 
 export interface MonitorStateUnchangedResponse {
@@ -145,6 +164,7 @@ export interface MonitorStateFullResponse {
   subagentCount: number;
   contextWindow: ContextWindowStats | null;
   totals: TokenTotals;
+  modelBreakdown: ModelBreakdownItem[];
   cache: CacheStats;
   history: TurnHistoryPoint[];
   sqliteEnabled: boolean;

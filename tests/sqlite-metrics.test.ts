@@ -423,11 +423,48 @@ describe('SqliteMetricsStore & SessionTreeManager integration', () => {
     expect(mainMetrics.contextWindow?.lastThinkingTokens).toBe(320);
     expect(mainMetrics.performance?.displayTps).toBe(250);
     expect(mainMetrics.history[0]?.tps).toBe(250);
+    expect(mainMetrics.history[0]?.modelDisplayName).toBe('Gemini 4 Neon (High)');
+    expect(mainMetrics.modelBreakdown).toEqual([
+      {
+        model: 'gemini-4-neon-high',
+        modelDisplayName: 'Gemini 4 Neon (High)',
+        requestCount: 1,
+        inputTokens: 1000,
+        cacheReadTokens: 9000,
+        cacheWriteTokens: 300,
+        totalInputTokens: 10300,
+        outputTokens: 500,
+        thinkingTokens: 320,
+        responseTokens: 180,
+        totalTokens: 10800,
+        hitRate: 87.4,
+        avgTps: 250,
+        avgTtftSec: 1.2,
+      },
+    ]);
 
     const allMetrics = tree.buildMetricsForScope(rootId, {}, undefined, 'all');
     expect(allMetrics.totals.cacheWriteTokens).toBe(400);
     expect(allMetrics.totals.thinkingTokens).toBe(440);
     expect(allMetrics.totals.responseTokens).toBe(360);
+    expect(allMetrics.modelBreakdown).toEqual([
+      {
+        model: 'gemini-4-neon-high',
+        modelDisplayName: 'Gemini 4 Neon (High)',
+        requestCount: 2,
+        inputTokens: 1500,
+        cacheReadTokens: 11000,
+        cacheWriteTokens: 400,
+        totalInputTokens: 12900,
+        outputTokens: 800,
+        thinkingTokens: 440,
+        responseTokens: 360,
+        totalTokens: 13700,
+        hitRate: 85.3,
+        avgTps: 275,
+        avgTtftSec: 1,
+      },
+    ]);
 
     // Custom override > native > builtin > default
     saveUserModelLimit(pluginDataDir, 'gemini-4-neon-high', 300000);

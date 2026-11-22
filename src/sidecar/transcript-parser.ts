@@ -247,8 +247,10 @@ function processLine(state: ParsedTranscriptState, line: string): boolean {
         ? Math.round(obj.step_index)
         : state.turns.length;
 
-    if (typeof obj.model === 'string' && obj.model.trim()) {
-      state.latestModel = obj.model.trim();
+    const turnModel =
+      typeof obj.model === 'string' && obj.model.trim() ? obj.model.trim() : undefined;
+    if (turnModel) {
+      state.latestModel = turnModel;
     }
 
     const turnNumber = state.turns.length + 1;
@@ -269,6 +271,7 @@ function processLine(state: ParsedTranscriptState, line: string): boolean {
       turn: turnNumber,
       stepIndex,
       ts: typeof obj.created_at === 'string' ? obj.created_at : undefined,
+      ...(turnModel ? { model: turnModel } : {}),
       promptTokens,
       cacheReadTokens,
       inputTokens,

@@ -532,8 +532,9 @@ function processLine(state, line) {
     const promptTokens = inputTokens + cacheReadTokens;
     const hitRate = promptTokens > 0 ? round1(cacheReadTokens / promptTokens * 100) : 0;
     const stepIndex = typeof obj.step_index === "number" && Number.isFinite(obj.step_index) ? Math.round(obj.step_index) : state.turns.length;
-    if (typeof obj.model === "string" && obj.model.trim()) {
-      state.latestModel = obj.model.trim();
+    const turnModel = typeof obj.model === "string" && obj.model.trim() ? obj.model.trim() : void 0;
+    if (turnModel) {
+      state.latestModel = turnModel;
     }
     const turnNumber = state.turns.length + 1;
     const prevTurn = state.turns.length > 0 ? state.turns[state.turns.length - 1] : null;
@@ -548,6 +549,7 @@ function processLine(state, line) {
       turn: turnNumber,
       stepIndex,
       ts: typeof obj.created_at === "string" ? obj.created_at : void 0,
+      ...turnModel ? { model: turnModel } : {},
       promptTokens,
       cacheReadTokens,
       inputTokens,
@@ -977,7 +979,9 @@ function buildTotalsFromStates(convIds, transcripts, sqliteMetrics) {
 }
 function enrichTurnsWithSqlite(turns, sql) {
   if (!sql || sql.validItems.length === 0) {
-    return turns;
+    return turns.map(
+      (t) => t.model ? { ...t, modelDisplayName: formatModelDisplayName(t.model) } : t
+    );
   }
   const items = sql.validItems;
   const used = /* @__PURE__ */ new Set();
@@ -1008,13 +1012,25 @@ function enrichTurnsWithSqlite(turns, sql) {
     const prevStepIdx = idx > 0 ? turns[idx - 1].stepIndex : -1;
     const compacted = cpIdxs.length > 0 ? cpIdxs.some((cpIdx) => prevStepIdx < cpIdx && cpIdx < t.stepIndex) : t.compacted;
     if (!g) {
-      return compacted !== t.compacted ? { ...t, compacted } : t;
+      if (compacted !== t.compacted || t.model) {
+        return {
+          ...t,
+          compacted,
+          ...t.model ? { modelDisplayName: formatModelDisplayName(t.model) } : {}
+        };
+      }
+      return t;
     }
     const promptTokens = g.inTok + g.cacheWrite + g.cacheRead;
     const hitRate = promptTokens > 0 ? round1(g.cacheRead / promptTokens * 100) : 0;
     const speed = computeSpeedStats(g.outTok, g.ttft, g.stream);
+    const effectiveModel = t.model || g.modelName || void 0;
     return {
       ...t,
+      ...effectiveModel ? {
+        model: effectiveModel,
+        modelDisplayName: formatModelDisplayName(effectiveModel)
+      } : {},
       promptTokens,
       cacheReadTokens: g.cacheRead,
       cacheWriteTokens: g.cacheWrite,
@@ -1028,6 +1044,94 @@ function enrichTurnsWithSqlite(turns, sql) {
       compacted
     };
   });
+}
+function isSlugLikeModel(rawModel) {
+  return Boolean(rawModel) && rawModel !== "unknown" && !/\s/.test(rawModel);
+}
+function buildModelBreakdown(convIds, transcripts, sqliteMetrics, fallbackModel) {
+  const buckets = /* @__PURE__ */ new Map();
+  for (const id of convIds) {
+    const state = transcripts.get(id);
+    if (!state || state.turns.length === 0) continue;
+    const enrichedTurns = enrichTurnsWithSqlite(state.turns, sqliteMetrics.get(id));
+    for (const turn of enrichedTurns) {
+      const rawModel = turn.model || state.latestModel || (id === convIds[0] ? fallbackModel : void 0) || "unknown";
+      const displayName = formatModelDisplayName(rawModel);
+      const groupKey = displayName.toLowerCase();
+      let b = buckets.get(groupKey);
+      if (!b) {
+        b = {
+          model: rawModel,
+          modelDisplayName: displayName,
+          requestCount: 0,
+          inputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          outputTokens: 0,
+          thinkingTokens: 0,
+          responseTokens: 0,
+          hasThinkingSplit: false,
+          tpsSum: 0,
+          tpsCount: 0,
+          ttftSum: 0,
+          ttftCount: 0
+        };
+        buckets.set(groupKey, b);
+      } else if (!isSlugLikeModel(b.model) && isSlugLikeModel(rawModel)) {
+        b.model = rawModel;
+      }
+      b.requestCount += 1;
+      b.inputTokens += turn.inputTokens;
+      b.cacheReadTokens += turn.cacheReadTokens;
+      b.cacheWriteTokens += turn.cacheWriteTokens ?? 0;
+      b.outputTokens += turn.outputTokens;
+      const thinkTok = turn.thinkingTokens ?? 0;
+      const respTok = turn.responseTokens ?? 0;
+      if (thinkTok > 0 || respTok > 0) {
+        b.hasThinkingSplit = true;
+        b.thinkingTokens += thinkTok;
+        b.responseTokens += respTok;
+      }
+      if (typeof turn.tps === "number" && turn.tps > 0) {
+        b.tpsSum += turn.tps;
+        b.tpsCount += 1;
+      }
+      if (typeof turn.ttftSec === "number" && turn.ttftSec > 0) {
+        b.ttftSum += turn.ttftSec;
+        b.ttftCount += 1;
+      }
+    }
+  }
+  const items = [];
+  for (const b of buckets.values()) {
+    const totalInputTokens = b.inputTokens + b.cacheWriteTokens + b.cacheReadTokens;
+    const totalTokens = totalInputTokens + b.outputTokens;
+    const hitRate = totalInputTokens > 0 ? round1(b.cacheReadTokens / totalInputTokens * 100) : 0;
+    items.push({
+      model: b.model,
+      modelDisplayName: b.modelDisplayName,
+      requestCount: b.requestCount,
+      inputTokens: b.inputTokens,
+      cacheReadTokens: b.cacheReadTokens,
+      cacheWriteTokens: b.cacheWriteTokens,
+      totalInputTokens,
+      outputTokens: b.outputTokens,
+      ...b.hasThinkingSplit ? {
+        thinkingTokens: b.thinkingTokens,
+        responseTokens: b.responseTokens
+      } : {},
+      totalTokens,
+      hitRate,
+      ...b.tpsCount > 0 ? { avgTps: Math.round(b.tpsSum / b.tpsCount) } : {},
+      ...b.ttftCount > 0 ? { avgTtftSec: Number((b.ttftSum / b.ttftCount).toFixed(2)) } : {}
+    });
+  }
+  items.sort((a, b) => {
+    if (b.totalTokens !== a.totalTokens) return b.totalTokens - a.totalTokens;
+    if (b.requestCount !== a.requestCount) return b.requestCount - a.requestCount;
+    return a.modelDisplayName.localeCompare(b.modelDisplayName);
+  });
+  return items;
 }
 var SessionTreeManager = class {
   transcripts = /* @__PURE__ */ new Map();
@@ -1335,11 +1439,18 @@ var SessionTreeManager = class {
     const targetSql = this.sqliteMetrics.get(targetId) ?? null;
     const model = isChildScope ? targetState?.latestModel || "unknown" : rootState?.latestModel || fallbackModel || "unknown";
     const modelDisplayName = formatModelDisplayName(model);
-    const totals = effectiveScope === "all" ? buildTotalsFromStates(
-      [rootId, ...descendants],
+    const scopeConvIds = effectiveScope === "all" ? [rootId, ...descendants] : [targetId];
+    const totals = buildTotalsFromStates(
+      scopeConvIds,
       this.transcripts,
       this.sqliteMetrics
-    ) : buildTotalsFromStates([targetId], this.transcripts, this.sqliteMetrics);
+    );
+    const modelBreakdown = buildModelBreakdown(
+      scopeConvIds,
+      this.transcripts,
+      this.sqliteMetrics,
+      isChildScope ? void 0 : fallbackModel
+    );
     const activeScopeLabel = effectiveScope === "all" ? "\u603B\u4F53" : effectiveScope === "main" ? "\u4E3B\u4F1A\u8BDD" : subsessions.find((s) => s.id === effectiveScope)?.label ?? `#${effectiveScope.slice(0, 6)}`;
     const rawTurns = targetState?.turns ?? [];
     const turns = enrichTurnsWithSqlite(rawTurns, targetSql);
@@ -1409,6 +1520,7 @@ var SessionTreeManager = class {
       subagentCount: descendants.length,
       contextWindow,
       totals,
+      modelBreakdown,
       cache: {
         overallHitRate,
         latestTurnHitRate,
@@ -1430,6 +1542,7 @@ var SessionTreeManager = class {
       subagentCount,
       contextWindow,
       totals,
+      modelBreakdown,
       cache,
       history,
       transcriptError
@@ -1440,6 +1553,7 @@ var SessionTreeManager = class {
       subagentCount,
       contextWindow,
       totals,
+      modelBreakdown,
       cache,
       history,
       transcriptError
@@ -1705,6 +1819,7 @@ var MonitorStateService = class {
           totalTokens: 0,
           requestCount: 0
         },
+        modelBreakdown: [],
         cache: {
           overallHitRate: 0,
           latestTurnHitRate: 0,
@@ -1741,6 +1856,7 @@ var MonitorStateService = class {
       subagentCount: metrics.subagentCount,
       contextWindow: metrics.contextWindow,
       totals: metrics.totals,
+      modelBreakdown: metrics.modelBreakdown,
       cache: metrics.cache,
       history: metrics.history,
       sqliteEnabled: metrics.sqliteEnabled,

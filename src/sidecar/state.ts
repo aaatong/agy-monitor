@@ -359,6 +359,7 @@ export class MonitorStateService {
           totalTokens: 0,
           requestCount: 0,
         },
+        modelBreakdown: [],
         cache: {
           overallHitRate: 0,
           latestTurnHitRate: 0,
@@ -397,6 +398,7 @@ export class MonitorStateService {
       subagentCount: metrics.subagentCount,
       contextWindow: metrics.contextWindow,
       totals: metrics.totals,
+      modelBreakdown: metrics.modelBreakdown,
       cache: metrics.cache,
       history: metrics.history,
       sqliteEnabled: metrics.sqliteEnabled,

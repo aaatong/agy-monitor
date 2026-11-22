@@ -260,6 +260,7 @@ describe('MonitorStateService auto-follow and cache behavior', () => {
     expect(emptyRes.activeScope).toBe('main');
     expect(emptyRes.activeScopeLabel).toBe('主会话');
     expect(emptyRes.subsessions).toEqual([]);
+    expect(emptyRes.modelBreakdown).toEqual([]);
 
     const brainDir = path.join(fakeHome, '.gemini', 'antigravity', 'brain');
     const rootId = '11111111-1111-1111-1111-111111111111';
@@ -298,6 +299,8 @@ describe('MonitorStateService auto-follow and cache behavior', () => {
     expect(mainRes.subsessions).toHaveLength(1);
     expect(mainRes.subsessions[0]?.label).toBe('worker-a');
     expect(mainRes.totals.totalTokens).toBe(1_100);
+    expect(mainRes.modelBreakdown).toHaveLength(1);
+    expect(mainRes.modelBreakdown[0]?.model).toBe('gemini-4-hydrogen-medium');
 
     // Matching clientScope -> unchanged: true
     const sameScopeRes = service.getState({

@@ -1,6 +1,16 @@
+import type { JSX } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { TurnHistoryPoint } from '../../shared/types';
 import { fmtExact, fmtPct, fmtTokens } from '../utils/format';
+import {
+  type ChartRange,
+  RECENT_WINDOW_SIZE,
+  computeCompactLabelIndices,
+  computeStepSpacing,
+  computeXLabelIndices,
+  findNearestIndex,
+  sliceHistoryByRange,
+} from '../utils/trend-chart';
 
 interface TrendChartProps {
   history: TurnHistoryPoint[];
@@ -10,14 +20,26 @@ interface TrendChartProps {
 type ChartTab = 'context' | 'cache' | 'speed';
 
 const PAD = { top: 10, right: 10, bottom: 18, left: 42 };
+const TREND_EXPANDED_STORAGE_KEY = 'agy-monitor:trend-expanded';
+
+function readInitialExpanded(): boolean {
+  try {
+    return window.localStorage.getItem(TREND_EXPANDED_STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
 
 export function TrendChart({ history, limitTokens }: TrendChartProps) {
+  const [expanded, setExpanded] = useState<boolean>(readInitialExpanded);
   const [tab, setTab] = useState<ChartTab>('context');
+  const [range, setRange] = useState<ChartRange>('recent');
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ width: 360, height: 108 });
 
   useEffect(() => {
+    if (!expanded) return;
     const el = containerRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
 
@@ -34,7 +56,28 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [expanded]);
+
+  const toggleExpanded = () => {
+    setExpanded((prev) => {
+      const next = !prev;
+      if (!next) {
+        setHoveredIdx(null);
+      }
+      try {
+        window.localStorage.setItem(TREND_EXPANDED_STORAGE_KEY, String(next));
+      } catch {
+        // ignore storage restrictions
+      }
+      return next;
+    });
+  };
+
+  const canToggleRange = history.length > RECENT_WINDOW_SIZE;
+  const visibleHistory = sliceHistoryByRange(
+    history,
+    canToggleRange ? range : 'all',
+  );
 
   const hasSpeed = history.some((p) => typeof p.tps === 'number' && p.tps > 0);
   const effectiveTab: ChartTab = !hasSpeed && tab === 'speed' ? 'context' : tab;
@@ -53,17 +96,24 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
   const PLOT_H = Math.max(56, SVG_H - PAD.top - PAD.bottom);
 
   const maxPrompt =
-    history.length > 0 ? Math.max(...history.map((p) => p.promptTokens)) : 0;
+    visibleHistory.length > 0
+      ? Math.max(...visibleHistory.map((p) => p.promptTokens))
+      : 0;
   const maxTps =
-    history.length > 0 ? Math.max(...history.map((p) => p.tps ?? 0), 100) : 100;
-  const speedPoints = history.filter((p) => typeof p.tps === 'number' && p.tps > 0);
+    visibleHistory.length > 0
+      ? Math.max(...visibleHistory.map((p) => p.tps ?? 0), 100)
+      : 100;
+  const speedPoints = visibleHistory.filter(
+    (p) => typeof p.tps === 'number' && p.tps > 0,
+  );
   const avgTps =
     speedPoints.length > 0
       ? Math.round(
-          speedPoints.reduce((sum, p) => sum + (p.tps ?? 0), 0) / speedPoints.length,
+          speedPoints.reduce((sum, p) => sum + (p.tps ?? 0), 0) /
+            speedPoints.length,
         )
       : 0;
-  const ttftPoints = history.filter(
+  const ttftPoints = visibleHistory.filter(
     (p) => typeof p.ttftSec === 'number' && p.ttftSec > 0,
   );
   const avgTtft =
@@ -74,13 +124,13 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
         ).toFixed(1)
       : '0.0';
   const avgHitRate =
-    history.length > 1
-      ? history.slice(1).reduce((sum, p) => sum + p.hitRate, 0) /
-        (history.length - 1)
-      : history.length === 1
-        ? history[0].hitRate
+    visibleHistory.length > 1
+      ? visibleHistory.slice(1).reduce((sum, p) => sum + p.hitRate, 0) /
+        (visibleHistory.length - 1)
+      : visibleHistory.length === 1
+        ? visibleHistory[0].hitRate
         : 0;
-  const compactCount = history.filter((p) => p.compacted).length;
+  const compactCount = visibleHistory.filter((p) => p.compacted).length;
 
   const maxVal = isCtx
     ? Math.max(maxPrompt, safeLimit * 0.3, 1000) * 1.15
@@ -90,14 +140,16 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
 
   const xFor = (i: number): number =>
     PAD.left +
-    (history.length <= 1 ? PLOT_W / 2 : (i / (history.length - 1)) * PLOT_W);
+    (visibleHistory.length <= 1
+      ? PLOT_W / 2
+      : (i / (visibleHistory.length - 1)) * PLOT_W);
 
   const yFor = (v: number): number =>
     PAD.top + PLOT_H - (Math.min(Math.max(v, 0), maxVal) / maxVal) * PLOT_H;
 
   const ticks = [0, maxVal * 0.5, maxVal];
 
-  const coords = history.map((p, i) => [
+  const coords = visibleHistory.map((p, i) => [
     xFor(i),
     yFor(isCtx ? p.promptTokens : isSpeed ? (p.tps ?? 0) : p.hitRate),
   ] as const);
@@ -116,26 +168,159 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
       ? `${linePath} L${coords[coords.length - 1][0].toFixed(1)},${(PAD.top + PLOT_H).toFixed(1)} L${coords[0][0].toFixed(1)},${(PAD.top + PLOT_H).toFixed(1)} Z`
       : '';
 
-  const labelIndices = new Set<number>();
-  if (history.length <= 7) {
-    history.forEach((_, i) => labelIndices.add(i));
-  } else {
-    const step = Math.ceil((history.length - 1) / 5);
-    for (let i = 0; i < history.length; i += step) {
-      labelIndices.add(i);
-    }
-    labelIndices.add(history.length - 1);
-  }
+  const pxPerStep = computeStepSpacing(visibleHistory.length, PLOT_W);
+  const showAllPoints = pxPerStep >= 10;
+  const strokeWidth = pxPerStep < 6 ? '1.4' : '1.8';
+
+  const labelIndices = computeXLabelIndices(visibleHistory.length, PLOT_W, 44);
+  const compactIndices: number[] = [];
+  visibleHistory.forEach((p, i) => {
+    if (p.compacted) compactIndices.push(i);
+  });
+  const compactLabelIndices = computeCompactLabelIndices(
+    coords.map((c) => c[0]),
+    compactIndices,
+    56,
+  );
 
   const hoveredPoint =
-    hoveredIdx !== null && hoveredIdx >= 0 && hoveredIdx < history.length
-      ? history[hoveredIdx]
+    hoveredIdx !== null && hoveredIdx >= 0 && hoveredIdx < visibleHistory.length
+      ? visibleHistory[hoveredIdx]
       : null;
+
+  const tooltipOnLeft =
+    hoveredIdx !== null && coords[hoveredIdx]
+      ? coords[hoveredIdx][0] > PAD.left + PLOT_W * 0.52
+      : false;
+
+  const handlePlotMouseMove = (e: JSX.TargetedMouseEvent<SVGRectElement>) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const mouseX = e.clientX - rect.left;
+    const nearest = findNearestIndex(
+      mouseX,
+      PAD.left,
+      PLOT_W,
+      visibleHistory.length,
+    );
+    setHoveredIdx((prev) => (prev === nearest ? prev : nearest));
+  };
+
+  const allMaxPrompt =
+    history.length > 0
+      ? Math.max(...history.map((p) => p.promptTokens))
+      : 0;
+  const allAvgHitRate =
+    history.length > 1
+      ? history.slice(1).reduce((sum, p) => sum + p.hitRate, 0) /
+        (history.length - 1)
+      : history.length === 1
+        ? history[0].hitRate
+        : 0;
+
+  if (!expanded) {
+    return (
+      <section class="agy-card p-3">
+        <button
+          type="button"
+          onClick={toggleExpanded}
+          aria-expanded={false}
+          class="w-full flex items-center justify-between gap-2 text-left cursor-pointer"
+        >
+          <div class="flex items-center gap-1.5 min-w-0">
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+              class="shrink-0"
+              style={{ color: 'var(--agy-muted)' }}
+            >
+              <path d="m9 18 6-6-6-6" />
+            </svg>
+            <h2 class="text-[13px] font-semibold tracking-tight">轮次走势</h2>
+          </div>
+
+          <span
+            class="text-[11.5px] tabular-nums truncate"
+            style={{ color: 'var(--agy-muted)' }}
+          >
+            {history.length > 0
+              ? `${history.length} 轮 · 峰值 ${fmtTokens(allMaxPrompt)} · 均命中 ${fmtPct(allAvgHitRate)}`
+              : '暂无记录'}
+          </span>
+        </button>
+      </section>
+    );
+  }
 
   return (
     <section class="agy-card p-3 flex-1 flex flex-col gap-2 min-h-[164px]">
-      <div class="flex items-center justify-between gap-2 shrink-0">
-        <h2 class="text-[13px] font-semibold tracking-tight">轮次走势</h2>
+      <div class="flex items-center justify-between gap-2 flex-wrap shrink-0">
+        <div class="flex items-center gap-1.5 min-w-0">
+          <button
+            type="button"
+            onClick={toggleExpanded}
+            aria-expanded={true}
+            class="inline-flex items-center gap-1.5 text-left cursor-pointer"
+            title="收起轮次走势"
+          >
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+              class="shrink-0 rotate-90 transition-transform"
+              style={{ color: 'var(--agy-muted)' }}
+            >
+              <path d="m9 18 6-6-6-6" />
+            </svg>
+            <h2 class="text-[13px] font-semibold tracking-tight">轮次走势</h2>
+          </button>
+
+          {canToggleRange && (
+            <div
+              class="agy-segmented agy-segmented-sm"
+              role="tablist"
+              aria-label="显示范围"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={range === 'recent'}
+                class={range === 'recent' ? 'on' : ''}
+                onClick={() => {
+                  setRange('recent');
+                  setHoveredIdx(null);
+                }}
+              >
+                近 {RECENT_WINDOW_SIZE}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={range === 'all'}
+                class={range === 'all' ? 'on' : ''}
+                onClick={() => {
+                  setRange('all');
+                  setHoveredIdx(null);
+                }}
+              >
+                全部
+              </button>
+            </div>
+          )}
+        </div>
 
         <div class="agy-segmented" role="tablist" aria-label="走势维度">
           <button
@@ -184,7 +369,7 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
         ref={containerRef}
         class="relative flex-1 min-h-[96px] w-full flex items-stretch"
       >
-        {history.length === 0 ? (
+        {visibleHistory.length === 0 ? (
           <div
             class="w-full flex-1 flex items-center justify-center rounded-[8px] border border-dashed text-[12px] text-center px-4"
             style={{
@@ -239,10 +424,11 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
                 );
               })}
 
-              {history.map((p, i) => {
+              {visibleHistory.map((p, i) => {
                 if (!p.compacted) return null;
                 const x = xFor(i);
                 const nearRight = x > SVG_W - PAD.right - 64;
+                const showLabel = compactLabelIndices.has(i);
                 return (
                   <g key={`compact-${p.stepIndex}-${i}`}>
                     <line
@@ -254,16 +440,25 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
                       stroke-width="1.2"
                       stroke-dasharray="4 3"
                     />
-                    <text
-                      x={nearRight ? (x - 5).toFixed(1) : (x + 5).toFixed(1)}
-                      y={PAD.top + 11}
-                      text-anchor={nearRight ? 'end' : 'start'}
-                      fill="var(--agy-warning)"
-                      font-size="11"
-                      font-weight="500"
-                    >
-                      /compact
-                    </text>
+                    {showLabel ? (
+                      <text
+                        x={nearRight ? (x - 5).toFixed(1) : (x + 5).toFixed(1)}
+                        y={PAD.top + 11}
+                        text-anchor={nearRight ? 'end' : 'start'}
+                        fill="var(--agy-warning)"
+                        font-size="11"
+                        font-weight="500"
+                      >
+                        /compact
+                      </text>
+                    ) : (
+                      <circle
+                        cx={x.toFixed(1)}
+                        cy={(PAD.top + 3).toFixed(1)}
+                        r="2.2"
+                        fill="var(--agy-warning)"
+                      />
+                    )}
                   </g>
                 );
               })}
@@ -287,22 +482,43 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
                   d={linePath}
                   fill="none"
                   stroke={lineColor}
-                  stroke-width="1.8"
+                  stroke-width={strokeWidth}
                   stroke-linejoin="round"
                   stroke-linecap="round"
                 />
               )}
 
-              {history.map((p, i) => {
+              {visibleHistory.map((p, i) => {
                 const [cx, cy] = coords[i];
                 const isHovered = hoveredIdx === i;
+                const showDot =
+                  showAllPoints ||
+                  isHovered ||
+                  p.compacted ||
+                  i === visibleHistory.length - 1;
+                const r = isHovered
+                  ? '4.2'
+                  : showAllPoints
+                    ? visibleHistory.length > 24
+                      ? '2.5'
+                      : '3.2'
+                    : '2.6';
+                const anchor =
+                  visibleHistory.length <= 1
+                    ? 'middle'
+                    : i === 0
+                      ? 'start'
+                      : i === visibleHistory.length - 1
+                        ? 'end'
+                        : 'middle';
+
                 return (
                   <g key={`pt-${p.stepIndex}-${i}`}>
                     {labelIndices.has(i) && (
                       <text
                         x={cx.toFixed(1)}
                         y={SVG_H - 4}
-                        text-anchor="middle"
+                        text-anchor={anchor}
                         fill="var(--agy-muted)"
                         font-size="11"
                       >
@@ -316,34 +532,39 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
                         r="7"
                         fill={lineColor}
                         fill-opacity="0.16"
+                        style={{ pointerEvents: 'none' }}
                       />
                     )}
-                    <circle
-                      class="chart-point"
-                      cx={cx.toFixed(1)}
-                      cy={cy.toFixed(1)}
-                      r={isHovered ? '4.5' : history.length > 24 ? '2.5' : '3.2'}
-                      fill="var(--agy-card)"
-                      stroke={p.compacted ? 'var(--agy-warning)' : lineColor}
-                      stroke-width="1.75"
-                    />
-                    <circle
-                      cx={cx.toFixed(1)}
-                      cy={cy.toFixed(1)}
-                      r="11"
-                      fill="transparent"
-                      style={{ cursor: 'pointer' }}
-                      onMouseEnter={() => setHoveredIdx(i)}
-                      onMouseLeave={() => setHoveredIdx(null)}
-                    />
+                    {showDot && (
+                      <circle
+                        class="chart-point"
+                        cx={cx.toFixed(1)}
+                        cy={cy.toFixed(1)}
+                        r={r}
+                        fill="var(--agy-card)"
+                        stroke={p.compacted ? 'var(--agy-warning)' : lineColor}
+                        stroke-width="1.75"
+                      />
+                    )}
                   </g>
                 );
               })}
+
+              <rect
+                x={PAD.left}
+                y={PAD.top}
+                width={PLOT_W}
+                height={PLOT_H}
+                fill="transparent"
+                style={{ cursor: 'crosshair' }}
+                onMouseMove={handlePlotMouseMove}
+                onMouseLeave={() => setHoveredIdx(null)}
+              />
             </svg>
 
             {hoveredPoint && (
               <div
-                class="pointer-events-none absolute top-1 right-1 rounded-[8px] px-2.5 py-1.5 text-[12px] border tabular-nums leading-snug"
+                class={`pointer-events-none absolute top-1 ${tooltipOnLeft ? 'left-[46px]' : 'right-1'} rounded-[8px] px-2.5 py-1.5 text-[12px] border tabular-nums leading-snug`}
                 style={{
                   backgroundColor: 'var(--agy-card)',
                   color: 'var(--agy-fg)',
@@ -359,6 +580,14 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
                     </span>
                   )}
                 </div>
+                {(hoveredPoint.modelDisplayName || hoveredPoint.model) && (
+                  <div
+                    class="text-[11px] truncate max-w-[190px]"
+                    style={{ color: 'var(--agy-muted)' }}
+                  >
+                    {hoveredPoint.modelDisplayName ?? hoveredPoint.model}
+                  </div>
+                )}
                 <div class="mt-0.5" style={{ color: 'var(--agy-muted)' }}>
                   上下文{' '}
                   <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
@@ -413,7 +642,11 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
           color: 'var(--agy-muted)',
         }}
       >
-        <span>{history.length} 轮</span>
+        <span>
+          {canToggleRange && range === 'recent'
+            ? `近 ${visibleHistory.length}/${history.length} 轮`
+            : `${history.length} 轮`}
+        </span>
         {isSpeed ? (
           <>
             <span>
@@ -434,7 +667,7 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
             <span>
               峰值{' '}
               <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
-                {history.length > 0 ? fmtTokens(maxPrompt) : '--'}
+                {visibleHistory.length > 0 ? fmtTokens(maxPrompt) : '--'}
               </strong>
             </span>
             <span>
@@ -448,7 +681,7 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
               >
                 {compactCount > 0
                   ? `${compactCount} 次`
-                  : history.length > 0
+                  : visibleHistory.length > 0
                     ? fmtPct(avgHitRate)
                     : '--'}
               </strong>

@@ -387,4 +387,123 @@ describe('session-tree', () => {
     expect(fallbackMetrics.activeScopeLabel).toBe('主会话');
     expect(fallbackMetrics.totals.totalTokens).toBe(10_200);
   });
+
+  it('aggregates modelBreakdown per scope and sorts by totalTokens descending', () => {
+    const brainDir = makeBrainDir();
+    const rootId = '11111111-1234-1111-1111-111111111111';
+    const childId = '22222222-1234-2222-2222-222222222222';
+
+    writeTranscript(brainDir, rootId, [
+      {
+        step_index: 0,
+        type: 'USER_INPUT',
+        content: '<USER_REQUEST>\nModel Breakdown\n</USER_REQUEST>',
+      },
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-22T00:00:01Z',
+        model: 'gemini-4-flash',
+        input_tokens: 1_000,
+        cache_read_tokens: 4_000,
+        output_tokens: 200,
+      },
+      {
+        step_index: 2,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-22T00:00:05Z',
+        model: 'gemini-4-neon-high',
+        input_tokens: 5_000,
+        cache_read_tokens: 15_000,
+        output_tokens: 500,
+      },
+      {
+        step_index: 3,
+        type: 'GENERIC',
+        content: JSON.stringify({ status: 'added', name: 'worker', conversation_id: childId }),
+      },
+    ]);
+
+    writeTranscript(brainDir, childId, [
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-22T00:00:08Z',
+        model: 'gemini-4-flash',
+        input_tokens: 2_000,
+        cache_read_tokens: 18_000,
+        output_tokens: 300,
+      },
+    ]);
+
+    const tree = new SessionTreeManager();
+    tree.sync(brainDir);
+
+    // main scope: gemini-4-neon-high (20,500) > gemini-4-flash (5,200)
+    const mainMetrics = tree.buildMetricsForScope(rootId, {}, undefined, 'main');
+    expect(mainMetrics.modelBreakdown).toEqual([
+      {
+        model: 'gemini-4-neon-high',
+        modelDisplayName: 'Gemini 4 Neon (High)',
+        requestCount: 1,
+        inputTokens: 5_000,
+        cacheReadTokens: 15_000,
+        cacheWriteTokens: 0,
+        totalInputTokens: 20_000,
+        outputTokens: 500,
+        totalTokens: 20_500,
+        hitRate: 75,
+      },
+      {
+        model: 'gemini-4-flash',
+        modelDisplayName: 'Gemini 4 Flash',
+        requestCount: 1,
+        inputTokens: 1_000,
+        cacheReadTokens: 4_000,
+        cacheWriteTokens: 0,
+        totalInputTokens: 5_000,
+        outputTokens: 200,
+        totalTokens: 5_200,
+        hitRate: 80,
+      },
+    ]);
+
+    // all scope: gemini-4-flash (5,200 + 20,300 = 25,500) > gemini-4-neon-high (20,500)
+    const allMetrics = tree.buildMetricsForScope(rootId, {}, undefined, 'all');
+    expect(allMetrics.modelBreakdown).toEqual([
+      {
+        model: 'gemini-4-flash',
+        modelDisplayName: 'Gemini 4 Flash',
+        requestCount: 2,
+        inputTokens: 3_000,
+        cacheReadTokens: 22_000,
+        cacheWriteTokens: 0,
+        totalInputTokens: 25_000,
+        outputTokens: 500,
+        totalTokens: 25_500,
+        hitRate: 88,
+      },
+      {
+        model: 'gemini-4-neon-high',
+        modelDisplayName: 'Gemini 4 Neon (High)',
+        requestCount: 1,
+        inputTokens: 5_000,
+        cacheReadTokens: 15_000,
+        cacheWriteTokens: 0,
+        totalInputTokens: 20_000,
+        outputTokens: 500,
+        totalTokens: 20_500,
+        hitRate: 75,
+      },
+    ]);
+
+    // child scope: only gemini-4-flash from child
+    const childMetrics = tree.buildMetricsForScope(rootId, {}, undefined, childId);
+    expect(childMetrics.modelBreakdown).toHaveLength(1);
+    expect(childMetrics.modelBreakdown[0]).toMatchObject({
+      model: 'gemini-4-flash',
+      requestCount: 1,
+      totalTokens: 20_300,
+    });
+  });
 });

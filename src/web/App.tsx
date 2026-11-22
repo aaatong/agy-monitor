@@ -7,6 +7,7 @@ import type {
 import { BrandLogo } from './components/BrandLogo';
 import { CacheCard } from './components/CacheCard';
 import { ContextCard } from './components/ContextCard';
+import { ModelStatsCard } from './components/ModelStatsCard';
 import { PerformanceCard } from './components/PerformanceCard';
 import { TotalsCard } from './components/TotalsCard';
 import { TrendChart } from './components/TrendChart';
@@ -654,6 +655,12 @@ export function App() {
           />
 
           <CacheCard cache={state?.cache ?? EMPTY_CACHE} />
+
+          <ModelStatsCard
+            models={state?.modelBreakdown ?? []}
+            activeScope={activeScope}
+            activeScopeLabel={activeScopeLabel}
+          />
 
           <TrendChart
             history={state?.history ?? []}

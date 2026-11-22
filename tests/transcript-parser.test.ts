@@ -60,6 +60,7 @@ describe('transcript-parser', () => {
     expect(state.turns[0]).toMatchObject({
       turn: 1,
       stepIndex: 1,
+      model: 'gemini-4-hydrogen-medium',
       promptTokens: 10_000,
       hitRate: 0,
       compacted: false,
@@ -107,6 +108,7 @@ describe('transcript-parser', () => {
     expect(syncTranscriptState(state)).toBe(true);
     expect(state.turns).toHaveLength(1);
     expect(state.latestModel).toBe('gemini-4-neon-high');
+    expect(state.turns[0]?.model).toBe('gemini-4-neon-high');
     expect(state.totals.requestCount).toBe(1);
   });
 

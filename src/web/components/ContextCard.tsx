@@ -167,7 +167,7 @@ export function ContextCard({
     !compactedPending && usagePct >= 80
       ? {
           type: 'error' as const,
-          text: `上下文已达 ${fmtPct(usagePct)}（下轮预估 ${fmtPct(contextWindow.estimatedNextPercent)}），建议尽快执行 /compact 压缩历史。`,
+          text: `上下文已达 ${fmtPct(usagePct)}，建议尽快执行 /compact 压缩历史。`,
         }
       : null;
 
@@ -402,7 +402,7 @@ export function ContextCard({
 
       {/* Footer hairline row */}
       <div
-        class="pt-1.5 border-t flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11.5px] tabular-nums"
+        class="pt-1.5 border-t flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[12px] tabular-nums"
         style={{
           borderColor: 'var(--agy-line)',
           color: 'var(--agy-muted)',
@@ -413,30 +413,32 @@ export function ContextCard({
           <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
             +{fmtExact(contextWindow.lastOutputTokens)}
           </strong>
-          {contextWindow.lastThinkingTokens !== undefined &&
-            contextWindow.lastThinkingTokens > 0 && (
-              <span class="ml-1">
-                (思 {fmtExact(contextWindow.lastThinkingTokens)} · 正{' '}
-                {fmtExact(
-                  contextWindow.lastResponseTokens ??
-                    Math.max(
-                      0,
-                      contextWindow.lastOutputTokens -
-                        contextWindow.lastThinkingTokens,
-                    ),
-                )}
-                )
+        </span>
+        {contextWindow.lastThinkingTokens !== undefined &&
+          contextWindow.lastThinkingTokens > 0 && (
+            <span class="inline-flex items-center gap-2">
+              <span>
+                思考{' '}
+                <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
+                  {fmtExact(contextWindow.lastThinkingTokens)}
+                </strong>
               </span>
-            )}
-        </span>
-        <span>
-          下轮预估{' '}
-          <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
-            {compactedPending
-              ? '待刷新'
-              : `${fmtTokens(contextWindow.estimatedNextTokens)} (${fmtPct(contextWindow.estimatedNextPercent)})`}
-          </strong>
-        </span>
+              <span aria-hidden="true">·</span>
+              <span>
+                正文{' '}
+                <strong class="font-medium" style={{ color: 'var(--agy-fg)' }}>
+                  {fmtExact(
+                    contextWindow.lastResponseTokens ??
+                      Math.max(
+                        0,
+                        contextWindow.lastOutputTokens -
+                          contextWindow.lastThinkingTokens,
+                      ),
+                  )}
+                </strong>
+              </span>
+            </span>
+          )}
       </div>
 
       {alertBanner && (

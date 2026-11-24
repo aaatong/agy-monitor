@@ -1,7 +1,7 @@
 import type { JSX } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { TurnHistoryPoint } from '../../shared/types';
-import { fmtExact, fmtPct, fmtTokens, fmtTurnTime } from '../utils/format';
+import { fmtPct, fmtTokens, fmtTurnTime } from '../utils/format';
 import {
   type ChartRange,
   RECENT_WINDOW_SIZE,
@@ -624,22 +624,6 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
                       : ''}
                   </div>
                 )}
-                {hoveredPoint.thinkingTokens !== undefined &&
-                  hoveredPoint.thinkingTokens > 0 && (
-                    <div style={{ color: 'var(--agy-muted)' }}>
-                      输出 {fmtTokens(hoveredPoint.outputTokens)} (思{' '}
-                      {fmtExact(hoveredPoint.thinkingTokens)} · 正{' '}
-                      {fmtExact(
-                        hoveredPoint.responseTokens ??
-                          Math.max(
-                            0,
-                            hoveredPoint.outputTokens -
-                              hoveredPoint.thinkingTokens,
-                          ),
-                      )}
-                      )
-                    </div>
-                  )}
               </div>
             )}
           </>

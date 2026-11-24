@@ -1,7 +1,7 @@
 import type { JSX } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { TurnHistoryPoint } from '../../shared/types';
-import { fmtExact, fmtPct, fmtTokens } from '../utils/format';
+import { fmtExact, fmtPct, fmtTokens, fmtTurnTime } from '../utils/format';
 import {
   type ChartRange,
   RECENT_WINDOW_SIZE,
@@ -187,6 +187,8 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
     hoveredIdx !== null && hoveredIdx >= 0 && hoveredIdx < visibleHistory.length
       ? visibleHistory[hoveredIdx]
       : null;
+
+  const hoveredTime = hoveredPoint ? fmtTurnTime(hoveredPoint.ts) : null;
 
   const tooltipOnLeft =
     hoveredIdx !== null && coords[hoveredIdx]
@@ -572,11 +574,21 @@ export function TrendChart({ history, limitTokens }: TrendChartProps) {
                   boxShadow: '0 4px 12px rgba(0, 0, 0, 0.12)',
                 }}
               >
-                <div class="font-semibold flex items-center gap-1.5">
-                  <span>Step #{hoveredPoint.stepIndex}</span>
-                  {hoveredPoint.compacted && (
-                    <span style={{ color: 'var(--agy-warning)' }}>
-                      (已压缩)
+                <div class="font-semibold flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-1.5">
+                    <span>Step #{hoveredPoint.stepIndex}</span>
+                    {hoveredPoint.compacted && (
+                      <span style={{ color: 'var(--agy-warning)' }}>
+                        (已压缩)
+                      </span>
+                    )}
+                  </div>
+                  {hoveredTime && (
+                    <span
+                      class="text-[11px] font-normal"
+                      style={{ color: 'var(--agy-muted)' }}
+                    >
+                      {hoveredTime}
                     </span>
                   )}
                 </div>

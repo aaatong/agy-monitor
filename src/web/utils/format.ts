@@ -17,6 +17,23 @@ export function fmtPct(n: number): string {
   return `${n.toFixed(1)}%`;
 }
 
+export function fmtTurnTime(ts?: string, now: Date = new Date()): string | null {
+  if (!ts) return null;
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return null;
+
+  const pad2 = (v: number) => String(v).padStart(2, '0');
+  const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+
+  if (sameDay) return time;
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${time}`;
+}
+
 export function parseColorLuminance(color: string): number | null {
   const c = color.trim();
   const hexMatch = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(c);

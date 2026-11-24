@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { fmtTurnTime } from '../src/web/utils/format';
 import {
   RECENT_WINDOW_SIZE,
   computeCompactLabelIndices,
@@ -90,5 +91,25 @@ describe('findNearestIndex', () => {
     expect(findNearestIndex(192, 42, 300, 11)).toBe(5);
     // 42 + 30*2.4 = 114 -> ratio 0.24 -> 2.4 -> rounds to 2
     expect(findNearestIndex(114, 42, 300, 11)).toBe(2);
+  });
+});
+
+describe('fmtTurnTime', () => {
+  it('returns null for missing or invalid timestamps', () => {
+    expect(fmtTurnTime(undefined)).toBeNull();
+    expect(fmtTurnTime('')).toBeNull();
+    expect(fmtTurnTime('not-a-date')).toBeNull();
+  });
+
+  it('formats same-day timestamps as HH:mm:ss', () => {
+    const now = new Date(2026, 10, 24, 22, 30, 0);
+    const sameDay = new Date(2026, 10, 24, 9, 5, 7).toISOString();
+    expect(fmtTurnTime(sameDay, now)).toBe('09:05:07');
+  });
+
+  it('formats different-day timestamps as MM-DD HH:mm:ss', () => {
+    const now = new Date(2026, 10, 24, 22, 30, 0);
+    const prevDay = new Date(2026, 10, 23, 14, 8, 9).toISOString();
+    expect(fmtTurnTime(prevDay, now)).toBe('11-23 14:08:09');
   });
 });

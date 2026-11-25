@@ -290,6 +290,15 @@ function processLine(state: ParsedTranscriptState, line: string): boolean {
   return changed;
 }
 
+export function isEnoentError(err: unknown): boolean {
+  return Boolean(
+    err &&
+      typeof err === 'object' &&
+      'code' in err &&
+      (err as NodeJS.ErrnoException).code === 'ENOENT',
+  );
+}
+
 /**
  * Incrementally parses newly appended complete lines from `transcript.jsonl`.
  * Returns `true` if any meaningful state changed or the file was reset.
@@ -299,6 +308,11 @@ export function syncTranscriptState(state: ParsedTranscriptState): boolean {
   try {
     stat = fs.statSync(state.transcriptPath);
   } catch (err) {
+    if (isEnoentError(err)) {
+      const hadError = state.lastError !== undefined;
+      state.lastError = undefined;
+      return hadError;
+    }
     const msg = err instanceof Error ? err.message : String(err);
     const changed = state.lastError !== msg;
     state.lastError = msg;

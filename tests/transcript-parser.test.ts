@@ -245,4 +245,33 @@ describe('transcript-parser', () => {
     syncTranscriptState(state);
     expect(state.childIds).toEqual([]);
   });
+
+  it('ignores ENOENT on missing transcript files until created, while preserving non-ENOENT errors', () => {
+    const filePath = makeTempFile();
+    const state = createEmptyTranscriptState('conv-missing', filePath);
+
+    // Missing file (ENOENT) should not populate lastError
+    expect(syncTranscriptState(state)).toBe(false);
+    expect(state.lastError).toBeUndefined();
+
+    // Once the transcript file appears, sync parses it cleanly
+    const line = JSON.stringify({
+      step_index: 1,
+      type: 'PLANNER_RESPONSE',
+      model: 'gemini-4-neon-medium',
+      input_tokens: 1_000,
+      cache_read_tokens: 0,
+      output_tokens: 50,
+    });
+    fs.writeFileSync(filePath, `${line}\n`, 'utf8');
+    expect(syncTranscriptState(state)).toBe(true);
+    expect(state.lastError).toBeUndefined();
+    expect(state.turns).toHaveLength(1);
+
+    // Non-ENOENT error (e.g., path is a directory) still sets lastError
+    const dirPath = path.dirname(filePath);
+    const dirState = createEmptyTranscriptState('conv-dir', dirPath);
+    expect(syncTranscriptState(dirState)).toBe(true);
+    expect(dirState.lastError).toBe('Transcript path is not a file');
+  });
 });

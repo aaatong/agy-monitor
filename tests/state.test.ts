@@ -345,4 +345,121 @@ describe('MonitorStateService auto-follow and cache behavior', () => {
     expect(childRes.activeScopeLabel).toBe('worker-a');
     expect(childRes.totals.totalTokens).toBe(3_100);
   });
+
+  it('does not emit transcriptError for a new session before its transcript file exists', () => {
+    const fakeHome = makeTempDir();
+    vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    delete process.env.PLUGIN_DATA;
+    delete process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
+
+    const brainDir = path.join(fakeHome, '.gemini', 'antigravity', 'brain');
+    const pluginDataDir = path.join(fakeHome, '.gemini', 'antigravity', 'plugin_data', 'agy-monitor');
+    const newConvId = '99999999-9999-9999-9999-999999999999';
+    const missingFullTranscript = path.join(
+      brainDir,
+      newConvId,
+      '.system_generated',
+      'logs',
+      'transcript_full.jsonl',
+    );
+
+    writeActiveSession(pluginDataDir, newConvId, missingFullTranscript);
+
+    const service = new MonitorStateService();
+
+    // Via active-session.json hook
+    const hookRes = service.getState({}) as MonitorStateFullResponse;
+    expect(hookRes.unchanged).toBe(false);
+    expect(hookRes.activeRootId).toBe(newConvId);
+    expect(hookRes.contextWindow).toBeNull();
+    expect(hookRes.transcriptError).toBeUndefined();
+
+    // Via explicit conversationId param + subsequent unchanged poll
+    const paneRes = service.getState({ conversationId: newConvId }) as MonitorStateFullResponse;
+    expect(paneRes.unchanged).toBe(false);
+    expect(paneRes.activeRootId).toBe(newConvId);
+    expect(paneRes.contextWindow).toBeNull();
+    expect(paneRes.transcriptError).toBeUndefined();
+
+    const pollRes = service.getState({
+      conversationId: newConvId,
+      version: paneRes.version,
+      clientRootId: paneRes.activeRootId ?? '',
+      clientSource: paneRes.source,
+      clientScope: paneRes.activeScope,
+    });
+    expect(pollRes).toEqual({
+      ok: true,
+      unchanged: true,
+      version: paneRes.version,
+    });
+  });
+
+  it('stays in empty standby in paneMode when conversationId is empty instead of falling back to other sessions', () => {
+    const fakeHome = makeTempDir();
+    vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    delete process.env.PLUGIN_DATA;
+    delete process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
+
+    const brainDir = path.join(fakeHome, '.gemini', 'antigravity', 'brain');
+    const pluginDataDir = path.join(fakeHome, '.gemini', 'antigravity', 'plugin_data', 'agy-monitor');
+
+    const prevConvId = '11111111-1111-1111-1111-111111111111';
+    const envConvId = '22222222-2222-2222-2222-222222222222';
+    const newConvId = '33333333-3333-3333-3333-333333333333';
+
+    const prevTranscript = writeTranscript(brainDir, prevConvId, 'Previous Session', 1_700_000_001_000);
+    writeTranscript(brainDir, envConvId, 'Env Session', 1_700_000_002_000);
+    writeActiveSession(pluginDataDir, prevConvId, prevTranscript);
+
+    const service = new MonitorStateService();
+
+    // 1. In paneMode with empty conversationId, do not fall back to hookData.active, envConversationId, or recent transcript
+    const standbyRes = service.getState({
+      paneMode: true,
+      envConversationId: envConvId,
+    }) as MonitorStateFullResponse;
+    expect(standbyRes.unchanged).toBe(false);
+    expect(standbyRes.activeRootId).toBeNull();
+    expect(standbyRes.source).toBe('none');
+    expect(standbyRes.contextWindow).toBeNull();
+    expect(standbyRes.totals.totalTokens).toBe(0);
+    expect(standbyRes.transcriptError).toBeUndefined();
+    expect(standbyRes.recentRoots.length).toBeGreaterThanOrEqual(2);
+
+    // 2. Subsequent poll in standby returns unchanged: true
+    const pollStandby = service.getState({
+      paneMode: true,
+      envConversationId: envConvId,
+      version: standbyRes.version,
+      clientRootId: '',
+      clientSource: 'none',
+      clientScope: standbyRes.activeScope,
+    });
+    expect(pollStandby).toEqual({
+      ok: true,
+      unchanged: true,
+      version: standbyRes.version,
+    });
+
+    // 3. Manual rootId selection still works while on an unsent pane
+    const manualRes = service.getState({
+      paneMode: true,
+      rootId: prevConvId,
+    }) as MonitorStateFullResponse;
+    expect(manualRes.unchanged).toBe(false);
+    expect(manualRes.activeRootId).toBe(prevConvId);
+    expect(manualRes.totals.totalTokens).toBe(3_100);
+
+    // 4. Once the new conversation gets a conversationId, switch to it immediately
+    const activeRes = service.getState({
+      paneMode: true,
+      conversationId: newConvId,
+    }) as MonitorStateFullResponse;
+    expect(activeRes.unchanged).toBe(false);
+    expect(activeRes.activeRootId).toBe(newConvId);
+    expect(activeRes.source).toBe('pane');
+    expect(activeRes.contextWindow).toBeNull();
+    expect(activeRes.transcriptError).toBeUndefined();
+  });
 });

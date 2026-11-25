@@ -190,6 +190,7 @@ function inferBrainDir(appDataDir: string, records: SessionRecord[]): string {
 export interface StateQueryParams {
   rootId?: string;
   conversationId?: string;
+  paneMode?: boolean;
   envConversationId?: string;
   scope?: string;
   version?: number;
@@ -284,6 +285,9 @@ export class MonitorStateService {
     } else if (params.conversationId) {
       activeRootId = this.tree.resolveRootId(params.conversationId);
       source = 'pane';
+    } else if (params.paneMode) {
+      activeRootId = null;
+      source = 'none';
     } else if (hookData?.active) {
       // Anti-hijack: if hook fired for a subagent/swarm child, resolve upward to its root
       activeRootId = this.tree.resolveRootId(hookData.active.conversationId);

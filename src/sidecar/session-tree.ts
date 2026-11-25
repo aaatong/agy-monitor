@@ -22,6 +22,7 @@ import {
 } from './sqlite-metrics.js';
 import {
   createEmptyTranscriptState,
+  isEnoentError,
   normalizeTranscriptPath,
   round1,
   syncTranscriptState,
@@ -424,8 +425,12 @@ export class SessionTreeManager {
         if (stat.mtimeMs !== state.mtimeMs || stat.size !== state.fileSize || state.lastError) {
           needsSync = true;
         }
-      } catch {
-        if (!state.lastError) needsSync = true;
+      } catch (err) {
+        if (isEnoentError(err)) {
+          if (state.lastError !== undefined) needsSync = true;
+        } else if (!state.lastError) {
+          needsSync = true;
+        }
       }
 
       if (needsSync && syncTranscriptState(state)) {

@@ -35,6 +35,8 @@ app.api(
       data && typeof data.rootId === 'string' ? data.rootId.trim() : '';
     const queryConvId =
       data && typeof data.conversationId === 'string' ? data.conversationId.trim() : '';
+    const paneMode =
+      data?.paneMode === true || data?.paneMode === '1' || data?.paneMode === 'true';
     const envConvId =
       typeof app.config?.conversationId === 'string' ? app.config.conversationId.trim() : '';
     const clientRootId =
@@ -56,6 +58,7 @@ app.api(
     return buildMonitorStateResponse({
       rootId: queryRootId || undefined,
       conversationId: queryConvId || undefined,
+      paneMode,
       envConversationId: envConvId || undefined,
       scope: scope || undefined,
       clientRootId,

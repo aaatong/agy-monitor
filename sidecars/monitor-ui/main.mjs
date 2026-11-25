@@ -565,11 +565,21 @@ function processLine(state, line) {
   }
   return changed;
 }
+function isEnoentError(err) {
+  return Boolean(
+    err && typeof err === "object" && "code" in err && err.code === "ENOENT"
+  );
+}
 function syncTranscriptState(state) {
   let stat;
   try {
     stat = fs2.statSync(state.transcriptPath);
   } catch (err) {
+    if (isEnoentError(err)) {
+      const hadError = state.lastError !== void 0;
+      state.lastError = void 0;
+      return hadError;
+    }
     const msg = err instanceof Error ? err.message : String(err);
     const changed = state.lastError !== msg;
     state.lastError = msg;
@@ -1220,8 +1230,12 @@ var SessionTreeManager = class {
         if (stat.mtimeMs !== state.mtimeMs || stat.size !== state.fileSize || state.lastError) {
           needsSync = true;
         }
-      } catch {
-        if (!state.lastError) needsSync = true;
+      } catch (err) {
+        if (isEnoentError(err)) {
+          if (state.lastError !== void 0) needsSync = true;
+        } else if (!state.lastError) {
+          needsSync = true;
+        }
       }
       if (needsSync && syncTranscriptState(state)) {
         anyChanged = true;
@@ -1763,6 +1777,9 @@ var MonitorStateService = class {
     } else if (params.conversationId) {
       activeRootId = this.tree.resolveRootId(params.conversationId);
       source = "pane";
+    } else if (params.paneMode) {
+      activeRootId = null;
+      source = "none";
     } else if (hookData?.active) {
       activeRootId = this.tree.resolveRootId(hookData.active.conversationId);
       source = "hook";
@@ -1941,6 +1958,7 @@ app.api(
   (data) => {
     const queryRootId = data && typeof data.rootId === "string" ? data.rootId.trim() : "";
     const queryConvId = data && typeof data.conversationId === "string" ? data.conversationId.trim() : "";
+    const paneMode = data?.paneMode === true || data?.paneMode === "1" || data?.paneMode === "true";
     const envConvId = typeof app.config?.conversationId === "string" ? app.config.conversationId.trim() : "";
     const clientRootId = data && typeof data.clientRootId === "string" ? data.clientRootId.trim() : void 0;
     const clientSource = data && typeof data.clientSource === "string" ? data.clientSource.trim() : void 0;
@@ -1951,6 +1969,7 @@ app.api(
     return buildMonitorStateResponse({
       rootId: queryRootId || void 0,
       conversationId: queryConvId || void 0,
+      paneMode,
       envConversationId: envConvId || void 0,
       scope: scope || void 0,
       clientRootId,

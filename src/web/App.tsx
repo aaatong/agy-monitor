@@ -80,6 +80,7 @@ export function App() {
   }, []);
 
   const fetchState = useCallback(async (forceFull = false) => {
+    const paneMode = typeof window !== 'undefined' && Boolean(window.sidecar);
     const convId = window.sidecar?.conversationId?.trim() || undefined;
     if (hasSeenConvIdRef.current && convId !== lastConvIdRef.current) {
       lastConvIdRef.current = convId;
@@ -106,6 +107,7 @@ export function App() {
       const res = await fetchMonitorState({
         version: sendVersion,
         conversationId: convId,
+        paneMode,
         rootId: selectedRootIdRef.current || undefined,
         scope: selectedScopeRef.current,
         clientRootId: sendVersion !== undefined ? clientRootIdRef.current : undefined,

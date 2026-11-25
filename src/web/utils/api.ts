@@ -13,6 +13,7 @@ function getFetcher(): (path: string, init?: RequestInit) => Promise<Response> {
 export interface FetchStateParams {
   version?: number;
   conversationId?: string;
+  paneMode?: boolean;
   rootId?: string;
   scope?: string;
   clientRootId?: string;
@@ -38,6 +39,9 @@ export async function fetchMonitorState(
   }
   if (params.conversationId) {
     qs.set('conversationId', params.conversationId);
+  }
+  if (params.paneMode) {
+    qs.set('paneMode', '1');
   }
   if (params.rootId) {
     qs.set('rootId', params.rootId);
